@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.log
+*.pid
+state.json
+.crewquay/
+credentials.json
+.env
+.venv/
+venv/
