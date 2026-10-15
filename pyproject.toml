@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crewquay-patrol"
+version = "3.0.0"
+description = "Durable bounded CrewQuay patrol client"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+crewquay-patrol = "patrol.index:main"
+
+[tool.setuptools.packages.find]
+include = ["patrol*"]
+namespaces = true

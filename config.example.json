@@ -1,0 +1,20 @@
+{
+  "database": "/absolute/private/path/patrol-v3.sqlite3",
+  "base_url": "https://mxrlyy.asia",
+  "journal": "DELETE",
+  "tick_seconds": 60,
+  "normal_scan_seconds": 600,
+  "active_scan_seconds": 60,
+  "cooldown_scan_seconds": 180,
+  "tick_budget_seconds": 50,
+  "request_timeout_seconds": 8,
+  "max_requests": 20,
+  "lease_seconds": 120,
+  "allow_writes": false,
+  "actor_id": "",
+  "allowed_chat_ids": [],
+  "project_ids": [],
+  "ack_single_enabled": false,
+  "ack_chat_map": {}
+}
+
