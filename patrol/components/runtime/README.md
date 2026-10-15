@@ -7,7 +7,7 @@ CLI与有界tick组合。
 稳定文件锁、预算次序、窄回调连接、能力不足blocked、状态/doctor。
 
 ## Non-responsibilities
-不安装服务、不部署、不托管LLM、不替成员claim/approve。
+不安装服务、不部署、不托管LLM、不替成员正式claim/approve。`export-pending` 不唤醒模型；`work-claim`/`work-finish` 只是携带本地租约版本的显式操作，不代替服务端审批。
 
 ## Public boundary
 `index.py` 导出 main/Tick/instance_lock。外部代码不得深导入私有实现。
