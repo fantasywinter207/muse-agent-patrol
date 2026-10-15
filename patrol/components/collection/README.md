@@ -16,7 +16,7 @@
 persistence.index、queue.index、transport.index。
 
 ## Invariants
-收到指针不等于处理；页面失败不跨越；received与handled分离。优先读取可见聊天与消息，再处理大规模 inbox 历史积压；每条已存储消息在提交事件、work 与 cursor 的事务内同时获得 metadata-only 评分；真实 Muse 评分可覆盖，但不得伪造模型调用。历史积压公平清理，不跳过旧 cursor 或直接 ACK。
+收到指针不等于处理；页面失败不跨越；received与handled分离。优先读取可见聊天与消息，再处理大规模 inbox 历史积压；每条已存储消息在提交事件、work 与 cursor 的事务内同时获得 metadata-only 评分；真实 Muse 评分可覆盖，但不得伪造模型调用。新消息的新鲜度在首次事件入库时（或旧库首次检查时使用首次 observed_at）写入不可被重复抓取延长的 message_receipts，不能等 inspect_event 执行才根据当前时间决定是否仍需待办；历史积压公平清理，不跳过旧 cursor 或直接 ACK。
 
 ## Testing boundary
 通过公开边界使用临时数据库、fake HTTP/WS和真实多进程故障场景核验；不读取真实凭据、不访问业务API。
