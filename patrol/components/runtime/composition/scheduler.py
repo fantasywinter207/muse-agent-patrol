@@ -9,6 +9,7 @@ from ...persistence.index import canonical, new_id
 from ...promises.index import Promises
 from ...queue.index import Queue, MessageScores
 from ...transport.index import BudgetExceeded, AuthError, connect_ready
+from ...wakeup.index import Wakeups
 
 
 class Tick:
@@ -20,6 +21,7 @@ class Tick:
         self.monotonic=monotonic
         self.ws_factory=ws_factory
         self.queue=Queue(db,config.lease_seconds)
+        self.wakeups=Wakeups(db,config.lease_seconds)
         self.scores=MessageScores(db)
         self.promises=Promises(db)
         self.attention=Attention(db,config)
@@ -208,7 +210,98 @@ class Tick:
         self.sync.reconcile_handled()
         return done
 
-    def run(self, websocket=False):
+    def run_light(self):
+        """One bounded incremental turn: no outbox writes, WS, or full backfill.
+
+        This is not a 60-second message delivery guarantee. Idle cursors can
+        still be scheduled 600s apart and server event history may lag.
+        """
+        self.run_id=new_id()
+        start=self.clock()
+        self.request_deadline=self.monotonic()+self.config.tick_budget_seconds
+        report={"run_id":self.run_id,"mode":"light","status":"ok","completed_work":0,
+                "started_at_utc_epoch":start,"errors":[],"incomplete_sources":[],
+                "outbox_attempts":[],"host_wakeups":0,"requests_used":0}
+        with self.db.transaction() as c:
+            c.execute("INSERT INTO patrol_runs(id,started_at,status) VALUES(?,?,'running')",
+                      (self.run_id,start))
+        try:
+            self.queue.recover(start)
+            report["wakeup_unknown_recovered"]=self.wakeups.recover(start)
+            self.attention.advance(start)
+            report["promise_alerts"]=self.promises.watchdog(start)
+            known=self.db.read("SELECT value FROM meta WHERE key='actor'")
+            self.actor=known[0]["value"] if known else None
+            # Local work has a reserved slot before any potentially exhausted GET.
+            report["completed_work"]+=self.execute(max(1,self.config.max_work_per_tick//2))
+            if self.collector:
+                self.actor=self.collector.identity()
+                now=self.clock()
+                # Only shallow chat discovery, capped per-source; never force
+                # historical cursor resets or scan every resource in light mode.
+                if self.sync.state("chats","global")["next_at"]<=now:
+                    if not self.collector.pages("chats","global","/api/v1/chats",now):
+                        report["incomplete_sources"].append("chats")
+                targets=set(self.config.allowed_chat_ids)
+                visible=self.db.read("SELECT value FROM meta WHERE key='visible_chats'")
+                if visible:
+                    targets.update(json.loads(visible[0]["value"]))
+                due=self.attention.due(now)
+                active={row["target"] for row in due if row["state"]!="idle"}
+                targets.update(active)
+                # Treat error backoff as binding; only due chat cursors.
+                candidates=[]
+                for cid in targets:
+                    cp=self.sync.state("messages",cid)
+                    if cp["next_at"]<=now:
+                        candidates.append((0 if cid in active else 1,cp["next_at"],cid))
+                candidates.sort()
+                for _,__,cid in candidates[:self.config.max_light_chats]:
+                    ok=self.collector.pages("messages",cid,
+                        "/api/v1/chats/"+quote(cid,safe="")+"/messages",
+                        self.clock(),interval=(self.config.active_scan_seconds
+                           if cid in active else self.config.normal_scan_seconds))
+                    if not ok:
+                        report["incomplete_sources"].append("messages:"+cid)
+                    elif cid in active:
+                        self.attention.checked(cid,self.clock())
+                if len(candidates)>self.config.max_light_chats:
+                    report["incomplete_sources"].append("chat_scan_capacity")
+                # Fetch a single page of notifications only when due. An old
+                # inbox cursor is *not* skipped to the newest item.
+                if self.sync.state("inbox","global")["next_at"]<=self.clock():
+                    if not self.collector.pages("inbox","global","/api/v1/inbox",self.clock()):
+                        report["incomplete_sources"].append("inbox")
+                report["errors"].extend(self.collector.errors)
+                # Streaming replay is handled by full tick until a verified
+                # low-cost event-only endpoint/contract is available.
+            report["completed_work"]+=self.execute(self.config.max_work_per_tick)
+        except (BudgetExceeded,AuthError) as e:
+            report["status"]="deferred" if isinstance(e,BudgetExceeded) else "authorization_failed"
+            report["errors"].append({"code":type(e).__name__})
+        finally:
+            # These are local, idempotent SQLite transactions, even if HTTP failed.
+            report["wakeup_staged"]=self.wakeups.stage(self.clock(),
+                threshold=self.config.wakeup_min_score)
+            report["wakeup_ready"]=len(self.db.read(
+                "SELECT id FROM wakeup_requests WHERE status IN ('pending','retry_wait') AND next_attempt_at<=?",
+                (self.clock(),)))
+            report["ended_at_utc_epoch"]=self.clock()
+            report["requests_used"]=getattr(self.client,"requests",0)
+            report["queue"]=self.queue.status()
+            if report["status"]=="ok" and report["errors"]:
+                report["status"]="degraded"
+            elif report["status"]=="ok" and report["incomplete_sources"]:
+                report["status"]="partial"
+            with self.db.transaction() as c:
+                c.execute("UPDATE patrol_runs SET ended_at=?,status=?,report=? WHERE id=?",
+                          (self.clock(),report["status"],canonical(report),self.run_id))
+        return report
+
+    def run(self, websocket=False, light=False):
+        if light:
+            return self.run_light()
+
         self.run_id=new_id()
         start=self.clock()
         self.request_deadline=self.monotonic()+self.config.tick_budget_seconds
@@ -314,6 +407,8 @@ class Tick:
                 report["completed_work"]+=self.execute(self.config.max_work_per_tick)
                 report["errors"].extend(self.collector.errors)
             report["errors"].extend(self.errors)
+            report["wakeup_staged"]=self.wakeups.stage(self.clock(),threshold=self.config.wakeup_min_score)
+            report["host_wakeups"]=0
             report["ended_at_utc_epoch"]=self.clock()
             report["queue"]=self.queue.status()
             report["status"]="degraded" if report["errors"] else "partial" if report.get("incomplete_sources") else "ok"
