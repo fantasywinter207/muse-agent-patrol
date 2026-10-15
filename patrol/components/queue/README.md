@@ -4,7 +4,7 @@
 本地工作调度。
 
 ## Responsibilities
-幂等入队、原子领取、租约恢复、版本检查与老任务提升。
+幂等入队、原子领取、租约恢复、版本检查、逐消息持久化评分与历史任务公平清理。
 
 ## Non-responsibilities
 不代表CrewQuay正式claim；不解释远端消息为指令。
@@ -16,7 +16,7 @@
 persistence.index；公开事务schema。
 
 ## Invariants
-过期/旧版本执行者不得完成任务；外部副作用由Outbox独立对账。
+过期/旧版本执行者不得完成任务；外部副作用由Outbox独立对账。每条已入库 REST 消息保留 0–100 基础分、独立 Muse 改分和评分审计。队列按有效分排序，老化加分有上限，每四个 slot 保留一个低优先级 backlog slot；任何文本评分都不能提升平台权限或构成任务批准。
 
 ## Testing boundary
 通过公开边界使用临时数据库、fake HTTP/WS和真实多进程故障场景核验；不读取真实凭据、不访问业务API。
