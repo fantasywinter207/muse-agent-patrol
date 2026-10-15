@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 from urllib.parse import quote, urlencode
 from ...persistence.index import canonical, cursor
-from ...queue.index import enqueue_tx
+from ...queue.index import enqueue_tx, baseline_tx
 from ...transport.index import BudgetExceeded, AuthError
 
 
@@ -52,11 +52,15 @@ class Sync:
                     VALUES(?,?,?,?,?,?,?) ON CONFLICT(source,scope,stream,external_key) DO NOTHING""",
                     (source,scope,stream,str(external),ec,canonical(item),now))
                 row=c.execute("SELECT id FROM events WHERE source=? AND scope=? AND stream=? AND external_key=?",(source,scope,stream,str(external))).fetchone()
-                # Fresh REST message pages outrank historical inbox/task inspection
-                # without dropping or acknowledging any earlier cursor.
-                priority=500 if source=="messages" else 200 if source in ("events","live") else 0
+                # Score every verified message in the SAME transaction as its event,
+                # inspection work, and received cursor. The baseline knows only
+                # sender and timing metadata; it is not an LLM judgement.
+                if source=="messages":
+                    score=baseline_tx(c,row[0],item,now)
+                else:
+                    score=40 if source in ("events","live") else 10
                 enqueue_tx(c,"event:"+str(row[0]),"inspect_event",{"event_id":row[0]},
-                           now,event_id=row[0],start_by=now+180,priority=priority)
+                           now,event_id=row[0],start_by=now+180,priority=score)
             c.execute("""INSERT INTO sync_cursors(source,scope,stream,received,target,next_at)
                 VALUES(?,?,?,?,?,?) ON CONFLICT(source,scope) DO UPDATE SET received=excluded.received,
                 target=excluded.target,next_at=excluded.next_at,failures=0""",
