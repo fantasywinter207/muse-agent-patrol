@@ -20,3 +20,9 @@ Windows结果不能替代Linux flock/目录持久性验证。Worker独立结果�
 运行 `python -m unittest discover -s tests -v`，应包括测试每条消息持久化基础分、注入文本不抬分、Muse 修改评分后重排、重复/越权拒绝、旧 500 优先级重置、历史份额、公平 backfill、独立审计以及 CLI 只读导出。SQLite 新增的 `message_scores` 和 `message_score_history` 属于可重复执行的 v1 additive schema extension，不修改旧 `received/handled`。
 
 注意：只有已下载进 SQLite 的消息能评分；`base_score` 表示启发式新鲜度，不是模型判定。由合法唤醒后的真实 Muse 提交评分及证据，不得假称模型已自动评分。初次迁移与旧队列仍需隔离 DB 检查积压，不能以单元测试代替实际新消息到处理时延的测量。
+
+## Event 202 回归：首次入库资格与预留执行预算
+
+通过 `tests/test_receipt_priority.py` 验证：当消息首次入库时在 15 分钟内，排队超过 15 分钟后仍然产生 human_action、但不会重开活跃关注窗口；首次入库时已经旧的消息即使被评分 99 也不伪装为新消息；重复 REST 抓取不刷新原始资格；已经存在于旧 v3 SQLite 的消息按第一次 observed_at 修复资格。另验证在 DB actor 已绑定时，即便远端 identity(GET) 立即 BudgetExceeded，仍能先完成本地高分消息 inspector、产生人类待办并返回 deferred 状态，且没有发送远端写请求。没有身份时 inspector 必须 retry_wait。
+
+测试不证明 Muse 自动执行或真实新消息的端到端延迟。上线后请对 Event 202 的 event、receipt、inspect_event 和 human_action 实测记录分别截取真实时间和状态。
