@@ -221,12 +221,12 @@ class Collector:
                     self.sync.page("projects",pid+suffix,"",items,"0",now,next_at=now+self.config.normal_scan_seconds)
         return complete
 
-    def events(self, waterline, stream, now):
+    def events(self, waterline, stream, now, force=False):
         waterline=cursor(str(waterline))
         state=self.sync.state("events","global")
         if state["stream"]!=stream or int(state["received"])>int(waterline):
             return "resync"
-        if state["next_at"]>now:
+        if state["next_at"]>now and (not force or state["failures"]):
             return "backoff"
         target=state["target"] or waterline
         after=state["received"]
