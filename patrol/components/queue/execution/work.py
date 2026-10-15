@@ -26,12 +26,24 @@ class Queue:
                          next_action_at=?,block_reason='expired local lease; reconcile Outbox before any remote effect'
                          WHERE status='running' AND lease_until<=?""", (now, now))
 
-    def claim(self, owner, now):
+    def claim(self, owner, now, lane="any"):
+        """Highest scored ready work, reserving optional slots for background.
+
+        A capped aging bonus prevents old tasks from dominating fresh high scores.
+        The scheduler dedicates every fourth slot to lower-priority backlog.
+        """
+        if lane not in ("any","background"):
+            raise ValueError("invalid queue lane")
+        background_filter="""
+            AND NOT EXISTS (
+                SELECT 1 FROM message_scores ms WHERE ms.event_id=work_items.event_id
+                AND COALESCE(ms.muse_score,ms.base_score)>=70)
+        """ if lane=="background" else ""
         with self.db.transaction() as c:
-            row = c.execute("""SELECT * FROM work_items WHERE status IN ('pending','retry_wait') AND next_action_at<=?
-                ORDER BY CASE WHEN start_by<=? THEN 1 ELSE 0 END DESC,
-                (priority + CAST((? - created_at)/300 AS INTEGER)) DESC, created_at LIMIT 1""",
-                            (now, now, now)).fetchone()
+            row = c.execute("""SELECT * FROM work_items WHERE status IN ('pending','retry_wait')
+                AND next_action_at<=? """+background_filter+"""
+                ORDER BY (priority + MIN(20,MAX(0,CAST((? - created_at)/600 AS INTEGER)))) DESC,
+                created_at ASC LIMIT 1""",(now,now)).fetchone()
             if not row:
                 return None
             c.execute("""UPDATE work_items SET status='running',lease_owner=?,lease_until=?,
