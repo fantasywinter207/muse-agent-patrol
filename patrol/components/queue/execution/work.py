@@ -41,6 +41,21 @@ class Queue:
             result["payload"] = json.loads(result["payload"])
             return result
 
+    def claim_specific(self, ident, owner, now):
+        """Explicit external-worker claim. Blocked work first needs an evidence-backed resume."""
+        if not owner or not ident:
+            raise ValueError("owner and work id required")
+        with self.db.transaction() as c:
+            n=c.execute("""UPDATE work_items SET status='running',lease_owner=?,lease_until=?,
+                lease_version=lease_version+1,attempts=attempts+1
+                WHERE id=? AND type='human_action' AND status IN ('pending','retry_wait')
+                AND next_action_at<=?""",(owner,now+self.lease_seconds,ident,now)).rowcount
+            if n!=1:
+                raise ValueError("human work unavailable; blocked work needs approved resume evidence")
+            row=dict(c.execute("SELECT * FROM work_items WHERE id=?",(ident,)).fetchone())
+            row["payload"]=json.loads(row["payload"])
+            return row
+
     def finish(self, item, now, evidence=None, status="done", reason=None, retry_at=None):
         if status not in ("done", "blocked", "needs_approval", "retry_wait"):
             raise ValueError("invalid work result")
