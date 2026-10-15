@@ -89,7 +89,7 @@ class Wakeups:
             if not self._source_alive(c,row):
                 c.execute("""UPDATE wakeup_requests SET status='obsolete' WHERE id=?
                     AND status IN ('pending','retry_wait')""",(ident,))
-                raise ValueError("wakeup source no longer needs attention")
+                return {"id":ident,"status":"obsolete","host_called":False}
             n=c.execute("""UPDATE wakeup_requests SET status='leased',lease_owner=?,
                 lease_until=?,lease_version=lease_version+1,attempts=attempts+1
                 WHERE id=? AND status IN ('pending','retry_wait') AND next_attempt_at<=?""",
