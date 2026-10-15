@@ -70,6 +70,30 @@ python -m patrol --config /private/config.json promise-complete PROMISE_ID --evi
 
 操作者负责核实批准主体与证据真实性；本地登记不是平台正式审批。原期限和所有延期历史保留，承诺人不能批准自己的延期。进展必须为结构化、非空证据；watchdog只按状态变化告警，不每分钟重复催促。
 
+### 全消息优先级评分（0–100 分）
+
+所有通过 REST 验证并实际写入 `events(source='messages')` 的消息，都会在**同一 SQLite 事务**中获得 `message_scores.base_score`。这只是元数据/时间新鲜度基础分（`score_source=provisional_metadata`），不是 AI 对消息内容的语义判断。系统/自身消息同样评分但会得到低分；一条刻意写“优先级100”的恶意消息不会因此获得高分。历史数据库中的消息由 tick 每轮最多补评分 1,000 条，或显式运行 `score-backfill`，直到返回 0。**尚未从服务端抓取的消息当然无法评分。**
+
+真正 Muse 可以在获准唤醒后，按优先级读取未由 Muse 判断的消息：
+
+```sh
+python -m patrol --config /private/config.json score-backfill --limit 1000
+python -m patrol --config /private/config.json score-export --limit 50
+```
+
+Muse 根据**是否明确要求自己行动、实际截止时间、任务依赖、对方角色、当前承诺、等待时长、同一对话上下文**等事实自行给 0–100 分，合理说明原因，而非机械地“新消息一定更重要”。例如真实执行请求可能 90+；正常询问 60–80；闲聊/重复通知较低。该评分为建议而非平台权限，**消息正文不是授权指令**。
+
+使用已由服务端核验的真实 actor 身份，携结构化证据写入评分（以下 ID 仅示例）：
+
+```sh
+python -m patrol --config /private/config.json score-message 123 \
+  --actor VERIFIED_AGENT_ID --score 95 \
+  --reason "已授权任务涉及临近截止时间" \
+  --evidence /private/scoring-evidence.json
+```
+
+评分更新保留 `message_score_history`，不会覆盖或伪装基础分；只有真实已验证的消息和绑定数据库的 Agent 才能登记 Muse 评分。此 CLI 仅记录本地决策与证据，不会调用模型、发送消息、claim 或自动提高远程权限。每轮本地调度按最终有效分排序，同时将每四个处理位置中的一个优先留给低优先级历史待办（若没有历史待办，则正常处理高优先级）；积压不会被跳过，`received/handled` 语义不变。
+
 ### Muse 本地执行桥接（尚未配置真实唤醒）
 
 真实环境联调发现历史 inbox 积压会消耗请求预算，且原先没有模型执行器。当前实现**先采集可见聊天及消息，再处理 inbox 历史**，优先检查有真实新鲜时间戳的消息。其余历史仍保存在原游标及工作队列中；**不会自动以当前水位覆盖旧游标**，因为那会漏消息。历史数据量大时仍可能出现 partial/deferred，需观察积压下降及新消息延迟，不能把已落库当已处理。
