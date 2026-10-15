@@ -14,6 +14,7 @@ from ...migration.index import migrate_legacy
 from ...outbox.index import Outbox
 from ...persistence.index import Database, Busy
 from ...promises.index import Promises
+from ...queue.index import Queue, export_pending
 from ...transport.index import Client, credential_provider
 from ..process.lock import instance_lock
 from .scheduler import Tick
@@ -97,6 +98,19 @@ def parser():
     a=sub.add_parser("resume")
     a.add_argument("id")
     a.add_argument("--evidence",required=True)
+    a=sub.add_parser("export-pending")
+    a.add_argument("--limit",type=int,default=50)
+    a=sub.add_parser("work-claim")
+    a.add_argument("id")
+    a.add_argument("--owner",required=True)
+    a=sub.add_parser("work-finish")
+    a.add_argument("id")
+    a.add_argument("--owner",required=True)
+    a.add_argument("--lease-version",type=int,required=True)
+    a.add_argument("--status",choices=("done","blocked","needs_approval","retry_wait"),default="done")
+    a.add_argument("--evidence",required=True)
+    a.add_argument("--reason")
+    a.add_argument("--retry-at")
     return p
 
 
@@ -165,9 +179,26 @@ def main(argv=None):
                 Promises(db).approve_extension(args.id,timestamp(args.due_at),args.approved_by,evidence(args.evidence),now)
                 result={"extension_approved":args.id}
             elif args.command=="resume":
-                from ...queue.index import Queue
                 Queue(db,cfg.lease_seconds).resume(args.id,now,evidence(args.evidence))
                 result={"resumed":args.id}
+            elif args.command=="export-pending":
+                result=export_pending(db,now,args.limit)
+            elif args.command=="work-claim":
+                item=Queue(db,cfg.lease_seconds).claim_specific(args.id,args.owner,now)
+                result={"work_id":item["id"],"lease_owner":item["lease_owner"],
+                        "lease_version":item["lease_version"],"lease_until":item["lease_until"],
+                        "payload":item["payload"],"warning":"local claim is not CrewQuay role authorization"}
+            elif args.command=="work-finish":
+                if args.status=="retry_wait" and not args.retry_at:
+                    raise ValueError("retry_wait requires explicit retry timestamp")
+                retry_at=timestamp(args.retry_at) if args.retry_at else None
+                if retry_at is not None and retry_at<=now:
+                    raise ValueError("retry_at must be in the future")
+                Queue(db,cfg.lease_seconds).finish(
+                    {"id":args.id,"lease_owner":args.owner,"lease_version":args.lease_version},
+                    now,evidence=evidence(args.evidence),status=args.status,
+                    reason=args.reason,retry_at=retry_at)
+                result={"finished_work":args.id,"status":args.status,"remote_action_issued":False}
             print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
             return 0 if result.get("status") not in ("authorization_failed","failed","deferred","degraded","partial") and result.get("imported") is not False else 1
     except Busy:
