@@ -32,8 +32,10 @@ class Promises:
         if due_at is not None and due_at<start_by:
             raise ValueError("deadline precedes start")
         start_limit={"simple":120,"normal":180,"complex":300}.get(kind,180)
-        if start_by-now>start_limit and not objective_reason:
-            raise ValueError("delayed first action requires an objective dependency reason")
+        # An external dependency can justify a later delivery, not postponing
+        # the *first* checkpoint. Inspect and record the dependency immediately.
+        if start_by-now>start_limit:
+            raise ValueError("first action must start within 2-5 minutes; document external dependencies as progress")
         due_limit=self.DEFAULT_DUE_LIMITS.get(kind,60*60)
         if due_at is not None and due_at-now>due_limit and not objective_reason:
             raise ValueError("long delivery deadline requires an objective explanation; start and follow-up remain immediate")
