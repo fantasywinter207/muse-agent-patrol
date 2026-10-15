@@ -8,8 +8,10 @@ def export_pending(db, now, limit=50):
     rows=db.read("""SELECT w.id,w.event_id,w.status,w.priority,w.start_by,w.next_action_at,
         w.due_at,w.block_reason,w.attempts,w.lease_until,
         e.source AS event_source,e.scope AS chat_id,e.external_key AS message_id,
+        ms.base_score,ms.muse_score,ms.reason AS score_reason,
         e.payload AS source_payload
         FROM work_items w LEFT JOIN events e ON w.event_id=e.id
+        LEFT JOIN message_scores ms ON ms.event_id=e.id
         WHERE w.type='human_action' AND w.status IN ('blocked','pending','retry_wait','needs_approval')
         AND NOT EXISTS (SELECT 1 FROM promises p WHERE p.work_item_id=w.id)
         ORDER BY CASE WHEN w.start_by IS NOT NULL AND w.start_by<=? THEN 0 ELSE 1 END,
@@ -18,6 +20,8 @@ def export_pending(db, now, limit=50):
     for row in rows:
         raw=row.pop("source_payload")
         payload=json.loads(raw) if raw is not None else {}
+        row["score"]=row["muse_score"] if row["muse_score"] is not None else row["base_score"]
+        row["score_source"]="muse" if row["muse_score"] is not None else "provisional_metadata"
         row["sender_id"]=payload.get("senderId")
         row["source_text"]=str(payload.get("content") or "")[:1000]
         row["needs_authorized_executor"]=row["status"] in ("blocked","needs_approval")
