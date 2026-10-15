@@ -32,13 +32,16 @@ class Queue:
         A capped aging bonus prevents old tasks from dominating fresh high scores.
         The scheduler dedicates every fourth slot to lower-priority backlog.
         """
-        if lane not in ("any","background"):
+        if lane not in ("any","background","local_messages"):
             raise ValueError("invalid queue lane")
         background_filter="""
             AND NOT EXISTS (
                 SELECT 1 FROM message_scores ms WHERE ms.event_id=work_items.event_id
                 AND COALESCE(ms.muse_score,ms.base_score)>=70)
-        """ if lane=="background" else ""
+        """ if lane=="background" else (
+            """ AND type='inspect_event' AND EXISTS (
+                SELECT 1 FROM events e WHERE e.id=work_items.event_id AND e.source='messages')
+            """ if lane=="local_messages" else "")
         with self.db.transaction() as c:
             row = c.execute("""SELECT * FROM work_items WHERE status IN ('pending','retry_wait')
                 AND next_action_at<=? """+background_filter+"""
