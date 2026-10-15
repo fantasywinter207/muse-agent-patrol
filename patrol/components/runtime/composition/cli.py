@@ -169,7 +169,7 @@ def main(argv=None):
                 Queue(db,cfg.lease_seconds).resume(args.id,now,evidence(args.evidence))
                 result={"resumed":args.id}
             print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
-            return 0 if result.get("status") not in ("authorization_failed","failed","deferred","degraded") and result.get("imported") is not False else 1
+            return 0 if result.get("status") not in ("authorization_failed","failed","deferred","degraded","partial") and result.get("imported") is not False else 1
     except Busy:
         print(json.dumps({"status":"busy","action":"deferred; no concurrent writer"}))
         return 75
