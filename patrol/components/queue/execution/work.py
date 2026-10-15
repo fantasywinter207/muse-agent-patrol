@@ -42,8 +42,17 @@ class Queue:
         with self.db.transaction() as c:
             row = c.execute("""SELECT * FROM work_items WHERE status IN ('pending','retry_wait')
                 AND next_action_at<=? """+background_filter+"""
-                ORDER BY (priority + MIN(20,MAX(0,CAST((? - created_at)/600 AS INTEGER)))) DESC,
-                created_at ASC LIMIT 1""",(now,now)).fetchone()
+                ORDER BY (
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM events e
+                        WHERE e.id=work_items.event_id AND e.source='messages'
+                    ) THEN COALESCE((
+                        SELECT COALESCE(ms.muse_score,ms.base_score)
+                        FROM message_scores ms WHERE ms.event_id=work_items.event_id
+                    ),20)
+                    ELSE priority END
+                    + MIN(20,MAX(0,CAST((? - created_at)/600 AS INTEGER)))
+                ) DESC, created_at ASC LIMIT 1""",(now,now)).fetchone()
             if not row:
                 return None
             c.execute("""UPDATE work_items SET status='running',lease_owner=?,lease_until=?,
