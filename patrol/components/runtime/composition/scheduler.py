@@ -144,12 +144,35 @@ class Tick:
                         # Unknown pointers must not be mislabeled as processed.
                         self.queue.finish(item,self.clock(),status="blocked",reason="unsupported resource pointer; explicit handler required")
                         continue
+                elif row["source"]=="inbox" and (value.get("event_type") or value.get("type"))=="chat.message.created":
+                    # An inbox notification is an untrusted pointer, not proof of
+                    # an external message. Only verified REST messages produce human work.
+                    cid=value.get("conversationId") or value.get("chatId") or value.get("roomId")
+                    if not isinstance(cid,str) or not cid:
+                        self.queue.finish(item,self.clock(),status="blocked",
+                                          reason="chat notification lacks a verified conversation id")
+                        self.db.alert("unmapped_inbox:"+str(row["id"]),"blocked",
+                                      {"event_id":row["id"],"reason":"missing chat id"},now)
+                        continue
+                    if not self.collector:
+                        self.queue.finish(item,now,status="retry_wait",
+                                          reason="offline inbox pointer needs REST confirmation",retry_at=now+60)
+                        continue
+                    if not self.collector.pages("messages",cid,
+                            "/api/v1/chats/"+quote(cid,safe="")+"/messages",now,force=True):
+                        self.queue.finish(item,self.clock(),status="retry_wait",
+                                          reason="inbox chat messages not yet fully fetched",retry_at=now+60)
+                        continue
+                    evidence["kind"]="inbox pointer reconciled by REST messages"
                 elif row["source"]=="messages":
                     cid=row["scope"]
                     external=self.actor is not None and value.get("senderId")!=self.actor and value.get("senderKind")!="system" and bool(value.get("content"))
-                    self.attention.observe(cid,row["external_key"],event_time(value.get("createdAt"),0),now,meaningful=external)
-                    if external:
-                        self.queue.enqueue("human:"+str(row["id"]),"human_action",{"event_id":row["id"],"reason":"external message requires authorized agent decision"},now,start_by=now+180)
+                    activated=self.attention.observe(cid,row["external_key"],event_time(value.get("createdAt"),0),now,meaningful=external)
+                    if activated and external:
+                        # Same durable message cannot create two human work items.
+                        self.queue.enqueue("human:"+cid+":"+str(row["external_key"]),"human_action",
+                                           {"event_id":row["id"],"reason":"fresh verified external message needs authorized decision"},
+                                           now,start_by=now+180,priority=1000)
                 self.queue.finish(item,self.clock(),evidence=evidence)
                 done+=1
             except (BudgetExceeded,AuthError):
