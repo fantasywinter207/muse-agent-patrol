@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 from urllib.parse import quote, urlencode
 from ...persistence.index import canonical, cursor
-from ...queue.index import enqueue_tx, baseline_tx
+from ...queue.index import enqueue_tx, baseline_tx, receipt_tx
 from ...transport.index import BudgetExceeded, AuthError
 
 
@@ -21,8 +21,10 @@ def event_time(value, fallback):
 
 
 class Sync:
-    def __init__(self, db):
+    def __init__(self, db, max_event_age_seconds=900, future_skew_seconds=60):
         self.db=db
+        self.max_event_age_seconds=max_event_age_seconds
+        self.future_skew_seconds=future_skew_seconds
 
     def state(self, source, scope):
         rows=self.db.read("SELECT * FROM sync_cursors WHERE source=? AND scope=?",(source,scope))
@@ -51,12 +53,16 @@ class Sync:
                 c.execute("""INSERT INTO events(source,scope,stream,external_key,cursor,payload,observed_at)
                     VALUES(?,?,?,?,?,?,?) ON CONFLICT(source,scope,stream,external_key) DO NOTHING""",
                     (source,scope,stream,str(external),ec,canonical(item),now))
-                row=c.execute("SELECT id FROM events WHERE source=? AND scope=? AND stream=? AND external_key=?",(source,scope,stream,str(external))).fetchone()
-                # Score every verified message in the SAME transaction as its event,
-                # inspection work, and received cursor. The baseline knows only
-                # sender and timing metadata; it is not an LLM judgement.
+                row=c.execute("SELECT id,payload,observed_at FROM events WHERE source=? AND scope=? AND stream=? AND external_key=?",
+                              (source,scope,stream,str(external))).fetchone()
+                # First receipt and its event/cursor/inspection are one transaction.
+                # Always use the original committed event on a replay: never
+                # refresh eligibility because a duplicate arrived later.
                 if source=="messages":
-                    score=baseline_tx(c,row[0],item,now)
+                    original=json.loads(row["payload"])
+                    receipt_tx(c,row["id"],original,row["observed_at"],
+                               self.max_event_age_seconds,self.future_skew_seconds)
+                    score=baseline_tx(c,row["id"],original,row["observed_at"])
                 else:
                     score=40 if source in ("events","live") else 10
                 enqueue_tx(c,"event:"+str(row[0]),"inspect_event",{"event_id":row[0]},
