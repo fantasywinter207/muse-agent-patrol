@@ -42,7 +42,8 @@ class MessagePriorityTests(unittest.TestCase):
         self.assertEqual(len(rows),2)
         self.assertEqual(rows[0]["priority"],rows[0]["base_score"])
         self.assertEqual(rows[1]["priority"],rows[1]["base_score"])
-        self.assertGreater(rows[1]["base_score"],rows[0]["base_score"])
+        scores={row["external_key"]:row["base_score"] for row in rows}
+        self.assertGreater(scores["new"],scores["old"])
         claim=self.q.claim("worker",200000)
         self.assertEqual(claim["payload"]["event_id"],self.db.read(
             "SELECT id FROM events WHERE external_key='new'")[0]["id"])
