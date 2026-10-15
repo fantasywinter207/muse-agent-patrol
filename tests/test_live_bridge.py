@@ -89,6 +89,21 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(self.db.read("SELECT status FROM work_items WHERE id=?",(ident,))[0]["status"],"done")
         self.assertEqual(len(self.db.read("SELECT * FROM alerts WHERE kind='local_handoff'")),1)
 
+    def test_work_renew_requires_real_new_evidence_and_valid_lease(self):
+        q=Queue(self.db,self.cfg.lease_seconds)
+        wid=q.enqueue("human:renew","human_action",{"task":"fixture"},100)
+        claimed=q.claim_specific(wid,"muse",100,{"approved_by":"owner"})
+        with self.assertRaises(ValueError):
+            q.renew(claimed,110,{"started":True})
+        result=q.renew(claimed,110,{"artifact":"first verifiable step"})
+        self.assertEqual(result["lease_until"],230)
+        with self.assertRaises(ValueError):
+            q.renew(claimed,120,{"artifact":"first verifiable step"})
+        with self.assertRaises(StaleLease):
+            q.renew(dict(claimed,lease_version=0),120,{"artifact":"different work"})
+        q.finish(claimed,125,evidence={"result":"finished"})
+        self.assertEqual(len(self.db.read("SELECT * FROM alerts WHERE kind='local_work_progress'")),1)
+
     def test_export_includes_overdue_promises_not_just_human_actions(self):
         Promises(self.db).create("muse","owner","source_1","deliver",100,105,110,due_at=300)
         feed=export_pending(self.db,150)
