@@ -242,6 +242,32 @@ class Tick:
                     report["completed_work"]+=self.execute(
                         max(1,self.config.max_work_per_tick//2),local_only=True)
                 now=self.clock()
+                # When full patrol has established an event stream, poll its
+                # waterline every light tick. Shallow replay catches new event
+                # pointers even when idle chat cursors are sleeping. No guessed
+                # bootstrap or waterline jump on stream mismatch.
+                checkpoint=self.sync.state("events","global")
+                if checkpoint["stream"] and checkpoint["stream"]!="!resync-required":
+                    if checkpoint["failures"] and checkpoint["next_at"]>now:
+                        report["incomplete_sources"].append("event_stream_backoff")
+                    else:
+                        response=self.client.request("GET","/api/v1/events?limit=1")
+                        body=response.body
+                        if (response.status==200 and isinstance(body,dict)
+                                and body.get("streamId") and body.get("waterline") is not None):
+                            if (checkpoint["stream"]==body["streamId"]
+                                    and int(checkpoint["received"])<=int(body["waterline"])):
+                                event_result=self.collector.events(str(body["waterline"]),
+                                    body["streamId"],self.clock(),force=True)
+                                report["event_replay"]=event_result
+                                if event_result!="complete":
+                                    report["incomplete_sources"].append("event_stream:"+event_result)
+                            else:
+                                report["incomplete_sources"].append("event_stream_requires_full_resync")
+                        else:
+                            report["incomplete_sources"].append("event_waterline_unavailable")
+                else:
+                    report["incomplete_sources"].append("event_stream_requires_full_bootstrap")
                 # Only shallow chat discovery, capped per-source; never force
                 # historical cursor resets or scan every resource in light mode.
                 if self.sync.state("chats","global")["next_at"]<=now:
