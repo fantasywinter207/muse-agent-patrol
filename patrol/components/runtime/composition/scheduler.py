@@ -418,6 +418,11 @@ class Tick:
             report["errors"].append({"code":type(e).__name__})
             return report
         finally:
+            if "wakeup_staged" not in report:
+                # A deferred network tick can still have completed local work.
+                report["wakeup_staged"]=self.wakeups.stage(
+                    self.clock(),threshold=self.config.wakeup_min_score)
+                report["host_wakeups"]=0
             if ws:
                 ws.close()
             report["alerts"]=[{"kind":r["kind"],**json.loads(r["detail"])}
