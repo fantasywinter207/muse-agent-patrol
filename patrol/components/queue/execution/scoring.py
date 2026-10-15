@@ -22,6 +22,25 @@ def _timestamp(value):
     return None
 
 
+def receipt_tx(c, event_id, message, observed_at, max_age_seconds=900, future_skew_seconds=60):
+    """Store first-receipt freshness; replays and delayed inspection cannot change it.
+
+    Work eligibility still requires a separate sender/meaningfulness check when
+    inspected. A delayed inspector must not use its current clock as the
+    message's original reception time.
+    """
+    if not isinstance(message,dict):
+        raise ValueError("message object required")
+    created=_timestamp(message.get("createdAt"))
+    fresh=int(created is not None
+              and observed_at-max_age_seconds<=created<=observed_at+future_skew_seconds)
+    c.execute("""INSERT INTO message_receipts(event_id,observed_at,message_created_at,fresh_at_receipt)
+        VALUES(?,?,?,?) ON CONFLICT(event_id) DO NOTHING""",
+        (event_id,observed_at,created,fresh))
+    return bool(c.execute("SELECT fresh_at_receipt FROM message_receipts WHERE event_id=?",
+                          (event_id,)).fetchone()[0])
+
+
 def baseline_score(message, observed_at, actor=None):
     """Score only verifiable metadata/freshness, not textual instructions."""
     if not isinstance(message,dict):
@@ -73,6 +92,16 @@ def baseline_tx(c, event_id, message, observed_at):
 class MessageScores:
     def __init__(self, db):
         self.db=db
+
+    def first_receipt_fresh(self, event_id, max_age_seconds=900, future_skew_seconds=60):
+        """Repair existing v3 events on first inspection using original observed_at."""
+        with self.db.transaction() as c:
+            row=c.execute("SELECT id,payload,observed_at FROM events WHERE id=? AND source='messages'",
+                          (event_id,)).fetchone()
+            if not row:
+                raise ValueError("verified durable message required")
+            return receipt_tx(c,event_id,json.loads(row["payload"]),row["observed_at"],
+                              max_age_seconds,future_skew_seconds)
 
     def backfill(self, limit=1000):
         if type(limit) is not int or not 1<=limit<=5000:

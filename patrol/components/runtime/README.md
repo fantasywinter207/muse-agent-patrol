@@ -16,7 +16,7 @@ CLI与有界tick组合。
 仅兄弟组件index；runtime内部composition/process私有实现。
 
 ## Invariants
-先执行到期工作再批量采集；默认只读；所有旧入口转此边界。全局游标未到期时，独立到期的消息或项目游标也必须唤醒；分页或预算未覆盖全部资源时返回 partial，不得虚报 ok。
+缓存有已核实 actor 身份时，必须先用本地预算执行到期任务，再进行任何远端身份校验/分页，避免网络 BudgetExceeded 抢走本地 inspect_event 的执行机会；没有核实身份不能默默将消息标记为 done。默认只读；所有旧入口转此边界。全局游标未到期时，独立到期的消息或项目游标也必须唤醒；分页或预算未覆盖全部资源时返回 partial，不得虚报 ok。
 
 ## Testing boundary
 通过公开边界使用临时数据库、fake HTTP/WS和真实多进程故障场景核验；不读取真实凭据、不访问业务API。

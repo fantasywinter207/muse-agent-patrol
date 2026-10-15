@@ -70,6 +70,26 @@ python -m patrol --config /private/config.json promise-complete PROMISE_ID --evi
 
 操作者负责核实批准主体与证据真实性；本地登记不是平台正式审批。原期限和所有延期历史保留，承诺人不能批准自己的延期。进展必须为结构化、非空证据；watchdog只按状态变化告警，不每分钟重复催促。
 
+### 入库时的工作资格与优先执行
+
+已入库的新消息在首次持久化时，通过创建时间和**首次入库时间**判断新鲜度，并写入 `message_receipts`。重复抓取不能刷新这个资格；尚未处理的老数据库消息在首次 inspect 时按历史 `events.observed_at` 补齐。若当时确属新消息，后来因队列积压超过 15 分钟，也必须在核实发送者且消息有意义后创建 `human_action`。这与 `attention_sessions` 分开：迟到的检查不会重启已经过期的 30 分钟活跃关注窗口。初次入库就已经过旧或没有可靠创建时间的消息不因打了高分而自动拥有新消息资格。
+
+Tick 对已保存、已核实 actor 的数据库优先执行预留的本地 inspector 批次，再走 GET 身份校验和历史采集。网络请求随后遇到 `BudgetExceeded` 仍可能返回 `deferred`，**但已完成的本地 inspection 与新待办不会回滚**。新库没有 actor 身份时仍先验证，若身份不明则保留待办重试，不能猜测是外部消息然后标 done。
+
+用于检查高分消息：
+
+```sql
+SELECT e.id,e.source,e.observed_at,mr.fresh_at_receipt,w.type,w.status,
+       w.priority,ms.base_score,ms.muse_score
+FROM events e
+LEFT JOIN message_receipts mr ON mr.event_id=e.id
+LEFT JOIN work_items w ON w.event_id=e.id
+LEFT JOIN message_scores ms ON ms.event_id=e.id
+WHERE e.id=202;
+```
+
+注意 Event ID 仅指对应 SQLite 数据库中的本地编号；高分和 `human_action` 只要求获授权 Muse 判断，不表示已正式领取任务或允许远程 POST。
+
 ### 全消息优先级评分（0–100 分）
 
 所有通过 REST 验证并实际写入 `events(source='messages')` 的消息，都会在**同一 SQLite 事务**中获得 `message_scores.base_score`。这只是元数据/时间新鲜度基础分（`score_source=provisional_metadata`），不是 AI 对消息内容的语义判断。系统/自身消息同样评分但会得到低分；一条刻意写“优先级100”的恶意消息不会因此获得高分。历史数据库中的消息由 tick 每轮最多补评分 1,000 条，或显式运行 `score-backfill`，直到返回 0。**尚未从服务端抓取的消息当然无法评分。**
