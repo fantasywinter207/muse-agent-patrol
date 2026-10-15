@@ -18,7 +18,7 @@ class Config:
     active_window_seconds: int = 1800
     cooldown_window_seconds: int = 600
     own_reply_window_seconds: int = 600
-    max_event_age_seconds: int = 300
+    max_event_age_seconds: int = 900
     future_skew_seconds: int = 60
     tick_budget_seconds: int = 50
     request_timeout_seconds: int = 8
@@ -42,6 +42,9 @@ class Config:
                     raise ValueError("invalid positive integer config: " + name)
         if type(self.allow_writes) is not bool or type(self.ack_single_enabled) is not bool:
             raise ValueError("write flags must be booleans")
+        # A message seen on the next idle tick must still be eligible to open attention.
+        if self.max_event_age_seconds < self.normal_scan_seconds + 60:
+            raise ValueError("max_event_age_seconds must cover idle polling plus scheduling slack")
         if self.request_timeout_seconds >= self.tick_budget_seconds:
             raise ValueError("request timeout must be below tick budget")
         if self.lease_seconds <= self.tick_budget_seconds:

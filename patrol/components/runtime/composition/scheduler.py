@@ -180,9 +180,12 @@ class Tick:
             active_ids=[r["target"] for r in due if r["state"]!="idle"]
             collection_due=any(self.sync.state(source,"global")["next_at"]<=start
                                for source in ("inbox","chats","tasks","updates","events"))
+            # Every per-chat/project checkpoint is a wake-up source, even when
+            # the five global collection cursors are still sleeping.
+            scope_due=self.db.read("SELECT 1 FROM sync_cursors WHERE source IN ('messages','projects') AND next_at<=? LIMIT 1",(start,))
             work_due=self.db.read("SELECT 1 FROM work_items WHERE type='inspect_event' AND status IN ('pending','retry_wait') AND next_action_at<=? LIMIT 1",(start,))
             writes_due=self.config.allow_writes and self.db.read("SELECT 1 FROM outbox WHERE status IN ('prepared','unknown','retry_wait') AND next_attempt_at<=? LIMIT 1",(start,))
-            needs_network=bool(not known or collection_due or active_ids or work_due or writes_due)
+            needs_network=bool(not known or collection_due or scope_due or active_ids or work_due or writes_due)
             # Reserve early execution time before bulk collectors can consume the budget.
             if self.collector and needs_network:
                 self.actor=self.collector.identity()
@@ -211,6 +214,8 @@ class Tick:
                         c.execute("INSERT INTO meta VALUES('resync_since',?) ON CONFLICT(key) DO NOTHING",(str(self.clock()),))
                         self.collector.resync_since=float(c.execute("SELECT value FROM meta WHERE key='resync_since'").fetchone()[0])
                 complete=self.collector.resources(self.clock(),force=bool(needs_resync),chat_ids=chat_ids)
+                if not complete:
+                    report.setdefault("incomplete_sources",[]).append("resource_snapshots")
                 if ready:
                     if needs_resync:
                         if complete:
@@ -221,9 +226,12 @@ class Tick:
                             report["resync_complete"]=True
                         else:
                             report["resync"]="incomplete; prior cursor retained"
+                            report.setdefault("incomplete_sources",[]).append("resync")
                     else:
                         result=self.collector.events(ready["waterline"],ready["streamId"],self.clock())
                         report["event_replay"]=result
+                        if result in ("incomplete","backoff","failed","resync"):
+                            report.setdefault("incomplete_sources",[]).append("event_stream:"+result)
                         if result=="resync":
                             # Keep old checkpoint. A fresh connection/waterline plus full REST reload
                             # is required on the next tick, recorded explicitly rather than guessing.
@@ -252,7 +260,7 @@ class Tick:
             report["errors"].extend(self.errors)
             report["ended_at_utc_epoch"]=self.clock()
             report["queue"]=self.queue.status()
-            report["status"]="degraded" if report["errors"] else "ok"
+            report["status"]="degraded" if report["errors"] else "partial" if report.get("incomplete_sources") else "ok"
             return report
         except (BudgetExceeded,AuthError) as e:
             report["status"]="deferred" if isinstance(e,BudgetExceeded) else "authorization_failed"

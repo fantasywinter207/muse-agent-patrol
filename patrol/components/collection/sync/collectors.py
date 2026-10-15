@@ -177,7 +177,16 @@ class Collector:
         current=self.sync.db.read("SELECT value FROM meta WHERE key='visible_chats'")
         if current:
             ids.update(json.loads(current[0]["value"]))
-        for cid in sorted(ids):
+        # Rotate fairly by the oldest due cursor, not lexicographic chat ID.
+        # Active chats may scan ahead of their normal 10-minute deadline,
+        # but a persisted 429/backoff always takes precedence.
+        def chat_deadline(cid):
+            state=self.sync.state("messages",cid)
+            due=state["next_at"]
+            if chat_ids and cid in chat_ids and not (state["failures"] and due>now):
+                due=min(due,now)
+            return (due,cid)
+        for cid in sorted(ids,key=chat_deadline):
             complete=self.pages("messages",cid,"/api/v1/chats/"+quote(cid,safe="")+"/messages",now,force or bool(chat_ids and cid in chat_ids),
                                 self.config.active_scan_seconds if chat_ids and cid in chat_ids else None) and complete
         for pid in self.config.project_ids:
