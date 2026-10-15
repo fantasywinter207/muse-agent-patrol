@@ -126,12 +126,12 @@ class Phase2Tests(unittest.TestCase):
 
     def test_near_due_promise_signal_is_deduped_and_progress_can_rekey(self):
         promises=Promises(self.db)
-        ident=promises.create("quill","owner","p1","do thing",1000,1050,1100,due_at=3000)
+        ident=promises.create("quill","owner","p1","do thing",1000,1050,1130,due_at=3000)
         w=Wakeups(self.db)
         self.assertEqual(w.stage(1000),0)
         self.assertEqual(w.stage(1010),1)
         self.assertEqual(w.stage(1011),0)
-        promises.progress(ident,1055,{"artifact":"new proof"},1100)
+        promises.progress(ident,1055,{"artifact":"new proof"},1130)
         # The same deadline should not generate a duplicate delivery.
         self.assertEqual(w.stage(1056),0)
         promises.progress(ident,1070,{"artifact":"newer proof"},1160)
