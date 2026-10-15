@@ -102,7 +102,7 @@ class Tick:
         # endpoint-specific readback contract is supplied. Never replay them blindly.
         return None
 
-    def execute(self, limit):
+    def execute(self, limit, local_only=False):
         done=0
         for _ in range(limit):
             if self.monotonic()>=self.request_deadline:
@@ -110,9 +110,9 @@ class Tick:
             now=self.clock()
             # Reserve every fourth inspection slot for lower-ranked backlog;
             # if no background work is due, use the slot for ordinary work.
-            lane="background" if _ % 4==3 else "any"
+            lane="local_messages" if local_only else ("background" if _ % 4==3 else "any")
             item=self.queue.claim(self.run_id,now,lane=lane)
-            if not item and lane=="background":
+            if not local_only and not item and lane=="background":
                 item=self.queue.claim(self.run_id,now)
             if not item:
                 break
@@ -233,9 +233,14 @@ class Tick:
             known=self.db.read("SELECT value FROM meta WHERE key='actor'")
             self.actor=known[0]["value"] if known else None
             # Local work has a reserved slot before any potentially exhausted GET.
-            report["completed_work"]+=self.execute(max(1,self.config.max_work_per_tick//2))
+            if known:
+                report["completed_work"]+=self.execute(
+                    max(1,self.config.max_work_per_tick//2),local_only=True)
             if self.collector:
                 self.actor=self.collector.identity()
+                if not known:
+                    report["completed_work"]+=self.execute(
+                        max(1,self.config.max_work_per_tick//2),local_only=True)
                 now=self.clock()
                 # Only shallow chat discovery, capped per-source; never force
                 # historical cursor resets or scan every resource in light mode.
