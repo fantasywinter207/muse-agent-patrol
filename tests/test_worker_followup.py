@@ -70,6 +70,16 @@ class Followup(unittest.TestCase):
         promises.progress(ident,130,{"artifact":"real-progress"},140)
         self.assertEqual(self.db.read("SELECT next_action_at FROM promises WHERE id=?",(ident,))[0]["next_action_at"],140)
 
+    def test_external_reason_cannot_defer_start_until_tomorrow(self):
+        promises=Promises(self.db)
+        with self.assertRaises(ValueError):
+            promises.create("worker","owner","late-start","task",100,1000,150,
+                            due_at=2000,objective_reason="dependency holds delivery")
+        # Start immediately to document the dependency, even if delivery is far away.
+        ident=promises.create("worker","owner","early-start","task",100,110,120,
+                              due_at=2000,objective_reason="dependency holds delivery")
+        self.assertTrue(ident)
+
     def test_normal_deadline_cannot_slip_to_tomorrow_without_reason(self):
         promises=Promises(self.db)
         with self.assertRaises(ValueError):
