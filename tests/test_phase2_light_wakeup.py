@@ -165,6 +165,46 @@ class Phase2Tests(unittest.TestCase):
         self.assertEqual(self.db.read("SELECT status FROM work_items WHERE type='inspect_event'")[0]["status"],"done")
         self.assertEqual(len(self.db.read("SELECT * FROM wakeup_requests")),1)
 
+    def test_light_event_waterline_replays_shallow_without_cursor_reset(self):
+        self.verified()
+        Sync(self.db).reset("known-stream","0",900)
+        calls=[]
+        class Fake:
+            requests=0
+            def request(self,method,path,*args):
+                self.requests+=1
+                calls.append(path)
+                if path=="/api/v1/agents/me":
+                    return Response(200,{"id":"quill"})
+                if path=="/api/v1/events?limit=1":
+                    return Response(200,{"streamId":"known-stream","waterline":"1"})
+                if path.startswith("/api/v1/events?after="):
+                    return Response(200,{"items":[{"eventId":"ev1","cursor":"1",
+                        "type":"event.redacted"}],"nextCursor":"1","hasMore":False})
+                return Response(200,{"items":[],"nextCursor":"0","hasMore":False})
+        result=Tick(self.db,self.cfg,client=Fake(),clock=lambda:1000).run(light=True)
+        self.assertEqual(result["event_replay"],"complete")
+        self.assertTrue(any(path.startswith("/api/v1/events?after=") for path in calls))
+        self.assertEqual(self.db.read("SELECT received FROM sync_cursors WHERE source='events'")[0]["received"],"1")
+        self.assertEqual(len(self.db.read("SELECT * FROM wakeup_requests")),0)
+
+    def test_light_respects_event_retry_after(self):
+        self.verified()
+        Sync(self.db).reset("known-stream","0",900)
+        Sync(self.db).failure("events","global",1000,retry_after=3600)
+        calls=[]
+        class Fake:
+            requests=0
+            def request(self,method,path,*args):
+                self.requests+=1
+                calls.append(path)
+                if path=="/api/v1/agents/me":
+                    return Response(200,{"id":"quill"})
+                return Response(200,{"items":[],"nextCursor":"0","hasMore":False})
+        result=Tick(self.db,self.cfg,client=Fake(),clock=lambda:1001).run(light=True)
+        self.assertIn("event_stream_backoff",result["incomplete_sources"])
+        self.assertFalse(any(path.startswith("/api/v1/events") for path in calls))
+
     def test_low_score_does_not_wake_host(self):
         q=Queue(self.db)
         q.enqueue("human:low","human_action",{"fixture":True},1000,priority=20)
