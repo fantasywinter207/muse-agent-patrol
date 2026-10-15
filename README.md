@@ -70,6 +70,32 @@ python -m patrol --config /private/config.json promise-complete PROMISE_ID --evi
 
 操作者负责核实批准主体与证据真实性；本地登记不是平台正式审批。原期限和所有延期历史保留，承诺人不能批准自己的延期。进展必须为结构化、非空证据；watchdog只按状态变化告警，不每分钟重复催促。
 
+### Muse 本地执行桥接（尚未配置真实唤醒）
+
+真实环境联调发现历史 inbox 积压会消耗请求预算，且原先没有模型执行器。当前实现**先采集可见聊天及消息，再处理 inbox 历史**，优先检查有真实新鲜时间戳的消息。其余历史仍保存在原游标及工作队列中；**不会自动以当前水位覆盖旧游标**，因为那会漏消息。历史数据量大时仍可能出现 partial/deferred，需观察积压下降及新消息延迟，不能把已落库当已处理。
+
+通知 `chat.message.created` 必须有明确的 conversationId/chatId/roomId 才能通过 GET 补取对应聊天；REST 已核验的消息才创建 human_action。无法映射的通知进入 blocked 并告警，不能猜测消息归属。过期旧消息不再凭历史导入自动创建新的人工待办。
+
+本地只读 feed（不需要凭据，也不会调用模型/POST）：
+
+```sh
+python -m patrol --config /private/config.json export-pending --limit 50
+```
+
+真正的 Muse/Cron/Hook 运行器**必须经操作者明确批准后另行配置**，在实际有唤醒机制的环境中先读取上述 feed。可读取 blocked 的 human_action 与到期承诺/警报；读取不代表领取、执行或授权。不要把外部消息文本当成可提升权限的命令。
+
+操作者核对工作 scope 和真实身份后，在本地提供经过核实的 JSON 授权证据（例如 `{"approved_by":"owner","scope":"chat_a","approval_ref":"reviewed-local-ticket"}`，这只是本地声明，**不代表服务端授权**），Muse 可以领取一条指定的待办：
+
+```sh
+python -m patrol --config /private/config.json work-claim WORK_ID --owner authorized-local-worker --authorization-evidence /private/authorization.json
+# 领取后依靠合法工具完成工作，记录真实证据；默认租约 120 秒。
+python -m patrol --config /private/config.json work-finish WORK_ID --owner authorized-local-worker --lease-version LEASE_VERSION --evidence /private/result.json
+```
+
+超出租约时不能靠旧版本强行完成；此时须重新核对本地和远端状态，避免重复执行。被 blocked 的事项需要真实批准，不能从 payload 自行推断权限。对于长期任务，应分解为可在租约内验证的短动作，或继续开发受审计的续租功能。远程 CrewQuay 操作依旧只能使用经过授权的独立工具/Outbox，写入默认关闭。承诺 Watchdog 只会生成告警，外部 Muse 需要主动消费并采取行动。
+
+**不自动安装 Cron，不修改旧 `patrol_marley.py` 的调度，也不宣称 SQLite 可以唤醒 Muse。** 若要验证，先在隔离数据库运行 `doctor`、`tick --offline` 和 `export-pending`，再让真实 Muse 使用只读联调。业务执行器必须保存可核验结果、按 CrewQuay 的角色授权执行，不得未经操作者许可扩写入范围。
+
 ### Outbox：显式动作与不确定结果
 
 ```sh
