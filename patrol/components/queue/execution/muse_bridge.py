@@ -11,11 +11,13 @@ def export_pending(db, now, limit=50):
         e.payload AS source_payload
         FROM work_items w LEFT JOIN events e ON w.event_id=e.id
         WHERE w.type='human_action' AND w.status IN ('blocked','pending','retry_wait','needs_approval')
+        AND NOT EXISTS (SELECT 1 FROM promises p WHERE p.work_item_id=w.id)
         ORDER BY CASE WHEN w.start_by IS NOT NULL AND w.start_by<=? THEN 0 ELSE 1 END,
         w.priority DESC,w.created_at LIMIT ?""",(now,limit))
     work=[]
     for row in rows:
-        payload=json.loads(row.pop("source_payload")) if row["event_id"] is not None else {}
+        raw=row.pop("source_payload")
+        payload=json.loads(raw) if raw is not None else {}
         row["sender_id"]=payload.get("senderId")
         row["source_text"]=str(payload.get("content") or "")[:1000]
         row["needs_authorized_executor"]=row["status"] in ("blocked","needs_approval")
