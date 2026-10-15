@@ -63,6 +63,32 @@ class Queue:
             row["payload"]=json.loads(row["payload"])
             return row
 
+    def renew(self, item, now, evidence):
+        """Renew a live local lease only with new nontrivial progress evidence."""
+        if not isinstance(evidence,dict) or not evidence or (
+                set(evidence).issubset({"started","working","in_progress","status"})
+                and all(isinstance(v,(str,bool)) for v in evidence.values())):
+            raise ValueError("lease renewal requires evidence of actual progress")
+        serialized=canonical(evidence)
+        with self.db.transaction() as c:
+            row=c.execute("""SELECT evidence FROM work_items WHERE id=? AND type='human_action'
+                AND status='running' AND lease_owner=? AND lease_version=? AND lease_until>?""",
+                (item["id"],item["lease_owner"],item["lease_version"],now)).fetchone()
+            if not row:
+                raise StaleLease("cannot renew expired or superseded lease")
+            if row["evidence"]==serialized:
+                raise ValueError("repeating the same evidence cannot prolong a lease")
+            c.execute("""UPDATE work_items SET lease_until=?,evidence=?,
+                first_action_at=COALESCE(first_action_at,?),last_progress_at=?
+                WHERE id=? AND lease_owner=? AND lease_version=? AND status='running'""",
+                (now+self.lease_seconds,serialized,now,now,
+                 item["id"],item["lease_owner"],item["lease_version"]))
+            detail={"work_id":item["id"],"lease_version":item["lease_version"],
+                    "owner":item["lease_owner"],"progress":evidence}
+            c.execute("INSERT INTO alerts(logical_key,kind,detail,created_at) VALUES(?,?,?,?)",
+                ("work_progress:"+new_id(),"local_work_progress",canonical(detail),now))
+            return {"lease_until":now+self.lease_seconds,"last_progress_at":now}
+
     def finish(self, item, now, evidence=None, status="done", reason=None, retry_at=None):
         if status not in ("done", "blocked", "needs_approval", "retry_wait"):
             raise ValueError("invalid work result")
