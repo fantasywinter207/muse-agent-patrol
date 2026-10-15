@@ -55,6 +55,18 @@ CREATE TABLE IF NOT EXISTS work_items(
  lease_owner TEXT, lease_version INTEGER NOT NULL DEFAULT 0, lease_until REAL,
  first_action_at REAL, last_progress_at REAL, evidence TEXT, block_reason TEXT);
 CREATE INDEX IF NOT EXISTS work_due ON work_items(status,next_action_at);
+-- Additive v1 schema extension, safe for existing local databases.
+CREATE TABLE IF NOT EXISTS message_scores(
+ event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+ base_score INTEGER NOT NULL CHECK(base_score BETWEEN 0 AND 100),
+ muse_score INTEGER CHECK(muse_score IS NULL OR muse_score BETWEEN 0 AND 100),
+ scored_by TEXT, reason TEXT, scored_at REAL,
+ baseline_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS message_score_history(
+ id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL REFERENCES events(id),
+ scorer TEXT NOT NULL, score INTEGER NOT NULL CHECK(score BETWEEN 0 AND 100),
+ reason TEXT NOT NULL, evidence TEXT NOT NULL, scored_at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS message_score_unrated ON message_scores(muse_score,event_id);
 CREATE TABLE IF NOT EXISTS promises(
  id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id),
  actor TEXT NOT NULL, recipient TEXT NOT NULL, source_message_id TEXT NOT NULL UNIQUE,

@@ -14,7 +14,7 @@ from ...migration.index import migrate_legacy
 from ...outbox.index import Outbox
 from ...persistence.index import Database, Busy
 from ...promises.index import Promises
-from ...queue.index import Queue, export_pending
+from ...queue.index import Queue, export_pending, MessageScores
 from ...transport.index import Client, credential_provider
 from ..process.lock import instance_lock
 from .scheduler import Tick
@@ -100,6 +100,16 @@ def parser():
     a.add_argument("--evidence",required=True)
     a=sub.add_parser("export-pending")
     a.add_argument("--limit",type=int,default=50)
+    a=sub.add_parser("score-backfill")
+    a.add_argument("--limit",type=int,default=1000)
+    a=sub.add_parser("score-export")
+    a.add_argument("--limit",type=int,default=50)
+    a=sub.add_parser("score-message")
+    a.add_argument("event_id",type=int)
+    a.add_argument("--score",type=int,required=True)
+    a.add_argument("--actor",required=True)
+    a.add_argument("--reason",required=True)
+    a.add_argument("--evidence",required=True)
     a=sub.add_parser("work-claim")
     a.add_argument("id")
     a.add_argument("--owner",required=True)
@@ -126,7 +136,7 @@ def main(argv=None):
         cfg=load_config(args.config,database=args.db)
         # File lock is stable across process exits and migrations. Never unlink it.
         with instance_lock(cfg.database+".tick.lock"):
-            if args.command in ("export-pending","work-claim","work-renew","work-finish") and not Path(cfg.database).is_file():
+            if args.command in ("export-pending","work-claim","work-renew","work-finish","score-backfill","score-export","score-message") and not Path(cfg.database).is_file():
                 raise ValueError("Muse handoff requires an existing initialized database")
             db=Database(cfg.database,cfg.journal)
             now=time.time()
@@ -191,6 +201,15 @@ def main(argv=None):
                 result={"resumed":args.id}
             elif args.command=="export-pending":
                 result=export_pending(db,now,args.limit)
+            elif args.command=="score-backfill":
+                total=MessageScores(db).backfill(args.limit)
+                result={"scored_historical_messages":total,"model_called":False}
+            elif args.command=="score-export":
+                result=MessageScores(db).unrated(args.limit)
+            elif args.command=="score-message":
+                result=MessageScores(db).rate(args.event_id,args.score,args.actor,
+                                              args.reason,evidence(args.evidence),now)
+            
             elif args.command=="work-claim":
                 item=Queue(db,cfg.lease_seconds).claim_specific(
                     args.id,args.owner,now,evidence(args.authorization_evidence))

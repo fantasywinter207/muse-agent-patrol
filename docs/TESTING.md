@@ -14,3 +14,9 @@ Windows结果不能替代Linux flock/目录持久性验证。Worker独立结果�
 新增隔离回归覆盖：新消息优先于 inbox 历史拉取、inbox 指针经 REST 二次验证、老消息不重新触发 human_action、无法映射时 blocked、只读 `export-pending`、明确 local authorization 的原子领取及过期租约保护。上线前应针对真实 inbox 消息字段验证映射、限制访问次数，确认 `partial/deferred` 不会被外部调度器当作“全部完成”。
 
 独立 Muse executor 的端到端验收需要实际批准的唤醒入口、操作者授权、本地领取、可验证行动证据、租约确认，方能把 human_action 标成 done。没有该证据只能报告基础设施离线测试通过。
+
+## 全消息评分验证边界
+
+运行 `python -m unittest discover -s tests -v`，应包括测试每条消息持久化基础分、注入文本不抬分、Muse 修改评分后重排、重复/越权拒绝、旧 500 优先级重置、历史份额、公平 backfill、独立审计以及 CLI 只读导出。SQLite 新增的 `message_scores` 和 `message_score_history` 属于可重复执行的 v1 additive schema extension，不修改旧 `received/handled`。
+
+注意：只有已下载进 SQLite 的消息能评分；`base_score` 表示启发式新鲜度，不是模型判定。由合法唤醒后的真实 Muse 提交评分及证据，不得假称模型已自动评分。初次迁移与旧队列仍需隔离 DB 检查积压，不能以单元测试代替实际新消息到处理时延的测量。
