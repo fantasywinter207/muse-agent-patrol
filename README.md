@@ -89,6 +89,8 @@ python -m patrol --config /private/config.json export-pending --limit 50
 ```sh
 python -m patrol --config /private/config.json work-claim WORK_ID --owner authorized-local-worker --authorization-evidence /private/authorization.json
 # 领取后依靠合法工具完成工作，记录真实证据；默认租约 120 秒。
+# 对耗时任务：到期前凭新的真实进展证据续租，不能重复提交相同证据或仅称正在处理：
+python -m patrol --config /private/config.json work-renew WORK_ID --owner authorized-local-worker --lease-version LEASE_VERSION --evidence /private/progress.json
 python -m patrol --config /private/config.json work-finish WORK_ID --owner authorized-local-worker --lease-version LEASE_VERSION --evidence /private/result.json
 ```
 
