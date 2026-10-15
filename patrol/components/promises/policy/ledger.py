@@ -5,6 +5,10 @@ from ...queue.index import enqueue_tx
 
 
 class Promises:
+    # A commitment can have a long delivery deadline, but must keep making short,
+    # inspectable next steps. A deadline is never a license to go idle until tomorrow.
+    MAX_NEXT_ACTION_DELAY = 15 * 60
+    DEFAULT_DUE_LIMITS = {"simple": 15 * 60, "normal": 60 * 60, "human_action": 60 * 60, "complex": 4 * 60 * 60}
     def __init__(self, db):
         self.db=db
 
@@ -23,13 +27,16 @@ class Promises:
             self._time(due_at)
         if start_by is None or next_action_at is None or start_by<now or next_action_at<now:
             raise ValueError("explicit start_by and next_action_at required")
+        if next_action_at-now>self.MAX_NEXT_ACTION_DELAY:
+            raise ValueError("next action must occur within 15 minutes, regardless of delivery deadline")
         if due_at is not None and due_at<start_by:
             raise ValueError("deadline precedes start")
         start_limit={"simple":120,"normal":180,"complex":300}.get(kind,180)
         if start_by-now>start_limit and not objective_reason:
             raise ValueError("delayed first action requires an objective dependency reason")
-        if kind=="simple" and due_at and due_at-now>900 and not objective_reason:
-            raise ValueError("simple target over 15m requires objective explanation")
+        due_limit=self.DEFAULT_DUE_LIMITS.get(kind,60*60)
+        if due_at is not None and due_at-now>due_limit and not objective_reason:
+            raise ValueError("long delivery deadline requires an objective explanation; start and follow-up remain immediate")
         ident=new_id()
         with self.db.transaction() as c:
             old=c.execute("SELECT id FROM promises WHERE source_message_id=?",(source_message_id,)).fetchone()
@@ -54,6 +61,12 @@ class Promises:
         self._time(next_action_at)
         if not isinstance(evidence,dict) or not evidence or next_action_at<=now:
             raise ValueError("progress requires structured evidence and next action")
+        if next_action_at-now>self.MAX_NEXT_ACTION_DELAY:
+            raise ValueError("progress cannot postpone the next action beyond 15 minutes")
+        # Merely claiming to be working is not evidence of real progress.
+        if set(evidence).issubset({"started","working","in_progress","status"}) and all(
+                isinstance(value,(str,bool)) for value in evidence.values()):
+            raise ValueError("self-reported activity alone is not progress evidence")
         with self.db.transaction() as c:
             if not c.execute("SELECT id FROM promises WHERE id=? AND status!='done'",(ident,)).fetchone():
                 raise ValueError("unknown or completed promise")
