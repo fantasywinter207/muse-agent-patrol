@@ -16,7 +16,7 @@
 persistence.index、queue.index、transport.index。
 
 ## Invariants
-收到指针不等于处理；页面失败不跨越；received与handled分离。
+收到指针不等于处理；页面失败不跨越；received与handled分离。优先读取可见聊天与消息，再处理大规模 inbox 历史积压；对消息 inspection 提升本地优先级，但绝不跳过旧 cursor 或直接 ACK。
 
 ## Testing boundary
 通过公开边界使用临时数据库、fake HTTP/WS和真实多进程故障场景核验；不读取真实凭据、不访问业务API。
