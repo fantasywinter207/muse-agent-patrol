@@ -121,6 +121,8 @@ def main(argv=None):
         cfg=load_config(args.config,database=args.db)
         # File lock is stable across process exits and migrations. Never unlink it.
         with instance_lock(cfg.database+".tick.lock"):
+            if args.command in ("export-pending","work-claim","work-finish") and not Path(cfg.database).is_file():
+                raise ValueError("Muse handoff requires an existing initialized database")
             db=Database(cfg.database,cfg.journal)
             now=time.time()
             if args.command=="init":
