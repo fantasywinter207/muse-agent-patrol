@@ -34,8 +34,9 @@ def main():
         r=subprocess.run(cmd,cwd=root,capture_output=True,text=True,timeout=180)
         name="command-"+str(index+1)+".txt"
         raw="$ "+" ".join(cmd)+"\n"+r.stdout+"\n"+r.stderr+"\nexit="+str(r.returncode)+"\n"
-        (out/name).write_text(raw,encoding="utf-8")
-        report["commands"].append({"command":cmd,"exit_code":r.returncode,"duration_seconds":time.time()-started,"raw_output":name,"sha256":hashlib.sha256(raw.encode()).hexdigest()})
+        raw_bytes=raw.encode("utf-8")
+        (out/name).write_bytes(raw_bytes)
+        report["commands"].append({"command":cmd,"exit_code":r.returncode,"duration_seconds":time.time()-started,"raw_output":name,"sha256":hashlib.sha256((out/name).read_bytes()).hexdigest()})
         print(r.stdout,end="")
         print(r.stderr,end="",file=sys.stderr)
     report["ended_at_utc_epoch"]=time.time()
