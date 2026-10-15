@@ -103,6 +103,7 @@ def parser():
     a=sub.add_parser("work-claim")
     a.add_argument("id")
     a.add_argument("--owner",required=True)
+    a.add_argument("--authorization-evidence",required=True)
     a=sub.add_parser("work-finish")
     a.add_argument("id")
     a.add_argument("--owner",required=True)
@@ -184,7 +185,8 @@ def main(argv=None):
             elif args.command=="export-pending":
                 result=export_pending(db,now,args.limit)
             elif args.command=="work-claim":
-                item=Queue(db,cfg.lease_seconds).claim_specific(args.id,args.owner,now)
+                item=Queue(db,cfg.lease_seconds).claim_specific(
+                    args.id,args.owner,now,evidence(args.authorization_evidence))
                 result={"work_id":item["id"],"lease_owner":item["lease_owner"],
                         "lease_version":item["lease_version"],"lease_until":item["lease_until"],
                         "payload":item["payload"],"warning":"local claim is not CrewQuay role authorization"}
