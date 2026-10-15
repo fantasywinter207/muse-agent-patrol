@@ -20,3 +20,6 @@ CLI与有界tick组合。
 
 ## Testing boundary
 通过公开边界使用临时数据库、fake HTTP/WS和真实多进程故障场景核验；不读取真实凭据、不访问业务API。
+
+## Phase 2 light tick
+`Tick.run(light=True)` 是现有 runtime 的模式，不增加第二个调度中心。以浅分页和请求时间预算优先检查已缓存的聊天，跳过历史全量任务/项目同步与远程 Outbox 发送。全量 `tick` 保持既有恢复职责；Light 与 Full 共享 SQLite、游标和文件锁。当前只实现尽力而为，空闲聊天的 600 秒扫描间隔以及初次历史数据积压仍可能影响发现时延。
