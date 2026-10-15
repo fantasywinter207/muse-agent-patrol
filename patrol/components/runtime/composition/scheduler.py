@@ -7,7 +7,7 @@ from ...collection.index import Collector, Sync, event_time
 from ...outbox.index import Outbox
 from ...persistence.index import canonical, new_id
 from ...promises.index import Promises
-from ...queue.index import Queue
+from ...queue.index import Queue, MessageScores
 from ...transport.index import BudgetExceeded, AuthError, connect_ready
 
 
@@ -20,6 +20,7 @@ class Tick:
         self.monotonic=monotonic
         self.ws_factory=ws_factory
         self.queue=Queue(db,config.lease_seconds)
+        self.scores=MessageScores(db)
         self.promises=Promises(db)
         self.attention=Attention(db,config)
         self.outbox=Outbox(db)
@@ -105,7 +106,12 @@ class Tick:
             if self.monotonic()>=self.request_deadline:
                 break
             now=self.clock()
-            item=self.queue.claim(self.run_id,now)
+            # Reserve every fourth inspection slot for lower-ranked backlog;
+            # if no background work is due, use the slot for ordinary work.
+            lane="background" if _ % 4==3 else "any"
+            item=self.queue.claim(self.run_id,now,lane=lane)
+            if not item and lane=="background":
+                item=self.queue.claim(self.run_id,now)
             if not item:
                 break
             if item["type"]!="inspect_event":
@@ -170,9 +176,11 @@ class Tick:
                     activated=self.attention.observe(cid,row["external_key"],event_time(value.get("createdAt"),0),now,meaningful=external)
                     if activated and external:
                         # Same durable message cannot create two human work items.
+                        scored=self.db.read("SELECT COALESCE(muse_score,base_score) AS score FROM message_scores WHERE event_id=?",(row["id"],))
                         self.queue.enqueue("human:"+cid+":"+str(row["external_key"]),"human_action",
                                            {"event_id":row["id"],"reason":"fresh verified external message needs authorized decision"},
-                                           now,start_by=now+180,priority=1000)
+                                           now,start_by=now+180,priority=scored[0]["score"] if scored else 25,
+                                           event_id=row["id"])
                 self.queue.finish(item,self.clock(),evidence=evidence)
                 done+=1
             except (BudgetExceeded,AuthError):
@@ -194,6 +202,9 @@ class Tick:
         alert_waterline=self.db.read("SELECT COALESCE(MAX(rowid),0) AS n FROM alerts")[0]["n"]
         try:
             self.queue.recover(start)
+            # Existing v3 databases already contain messages; score them in
+            # bounded batches without losing history or modifying remote cursors.
+            report["messages_backfilled"]=self.scores.backfill(limit=1000)
             self.outbox.recover(start,self.config.lease_seconds)
             self.attention.advance(start)
             report["alerts"]=self.promises.watchdog(start)
