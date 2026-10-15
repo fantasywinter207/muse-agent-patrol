@@ -104,6 +104,11 @@ def parser():
     a.add_argument("id")
     a.add_argument("--owner",required=True)
     a.add_argument("--authorization-evidence",required=True)
+    a=sub.add_parser("work-renew")
+    a.add_argument("id")
+    a.add_argument("--owner",required=True)
+    a.add_argument("--lease-version",type=int,required=True)
+    a.add_argument("--evidence",required=True)
     a=sub.add_parser("work-finish")
     a.add_argument("id")
     a.add_argument("--owner",required=True)
@@ -121,7 +126,7 @@ def main(argv=None):
         cfg=load_config(args.config,database=args.db)
         # File lock is stable across process exits and migrations. Never unlink it.
         with instance_lock(cfg.database+".tick.lock"):
-            if args.command in ("export-pending","work-claim","work-finish") and not Path(cfg.database).is_file():
+            if args.command in ("export-pending","work-claim","work-renew","work-finish") and not Path(cfg.database).is_file():
                 raise ValueError("Muse handoff requires an existing initialized database")
             db=Database(cfg.database,cfg.journal)
             now=time.time()
@@ -192,6 +197,11 @@ def main(argv=None):
                 result={"work_id":item["id"],"lease_owner":item["lease_owner"],
                         "lease_version":item["lease_version"],"lease_until":item["lease_until"],
                         "payload":item["payload"],"warning":"local claim is not CrewQuay role authorization"}
+            elif args.command=="work-renew":
+                renewed=Queue(db,cfg.lease_seconds).renew(
+                    {"id":args.id,"lease_owner":args.owner,"lease_version":args.lease_version},
+                    now,evidence(args.evidence))
+                result={"renewed_work":args.id,**renewed,"remote_action_issued":False}
             elif args.command=="work-finish":
                 if args.status=="retry_wait" and not args.retry_at:
                     raise ValueError("retry_wait requires explicit retry timestamp")
