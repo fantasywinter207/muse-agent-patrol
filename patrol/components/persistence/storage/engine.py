@@ -67,6 +67,14 @@ CREATE TABLE IF NOT EXISTS message_score_history(
  scorer TEXT NOT NULL, score INTEGER NOT NULL CHECK(score BETWEEN 0 AND 100),
  reason TEXT NOT NULL, evidence TEXT NOT NULL, scored_at REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS message_score_unrated ON message_scores(muse_score,event_id);
+-- Immutable first-observation freshness, separate from when a queued inspector runs.
+-- Existing databases receive this table additively; no cursor or event reset.
+CREATE TABLE IF NOT EXISTS message_receipts(
+ event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+ observed_at REAL NOT NULL,
+ message_created_at REAL,
+ fresh_at_receipt INTEGER NOT NULL CHECK(fresh_at_receipt IN (0,1)));
+
 CREATE TABLE IF NOT EXISTS promises(
  id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id),
  actor TEXT NOT NULL, recipient TEXT NOT NULL, source_message_id TEXT NOT NULL UNIQUE,
