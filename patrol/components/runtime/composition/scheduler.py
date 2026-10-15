@@ -24,7 +24,7 @@ class Tick:
         self.promises=Promises(db)
         self.attention=Attention(db,config)
         self.outbox=Outbox(db)
-        self.sync=Sync(db)
+        self.sync=Sync(db,config.max_event_age_seconds,config.future_skew_seconds)
         self.collector=Collector(self.sync,client.request,config) if client else None
         self.actor=None
         self.errors=[]
@@ -172,13 +172,30 @@ class Tick:
                     evidence["kind"]="inbox pointer reconciled by REST messages"
                 elif row["source"]=="messages":
                     cid=row["scope"]
-                    external=self.actor is not None and value.get("senderId")!=self.actor and value.get("senderKind")!="system" and bool(value.get("content"))
-                    activated=self.attention.observe(cid,row["external_key"],event_time(value.get("createdAt"),0),now,meaningful=external)
-                    if activated and external:
-                        # Same durable message cannot create two human work items.
+                    if not self.actor:
+                        # An unverified actor cannot safely classify a message
+                        # as someone else's. Preserve the inspector for a later tick.
+                        self.queue.finish(item,now,status="retry_wait",
+                                          reason="actor identity unavailable",retry_at=now+60)
+                        continue
+                    external=(value.get("senderId")!=self.actor
+                              and value.get("senderKind")!="system"
+                              and isinstance(value.get("content"),str)
+                              and bool(value["content"].strip()))
+                    # Already-ingested messages remain eligible even if queue
+                    # congestion made inspection happen after the 15m window.
+                    eligible=self.scores.first_receipt_fresh(
+                        row["id"],self.config.max_event_age_seconds,
+                        self.config.future_skew_seconds)
+                    # Attention is still time-bound; old delayed work must not
+                    # create a new 30-minute live watch window.
+                    self.attention.observe(cid,row["external_key"],
+                                           event_time(value.get("createdAt"),0),now,
+                                           meaningful=external)
+                    if eligible and external:
                         scored=self.db.read("SELECT COALESCE(muse_score,base_score) AS score FROM message_scores WHERE event_id=?",(row["id"],))
                         self.queue.enqueue("human:"+cid+":"+str(row["external_key"]),"human_action",
-                                           {"event_id":row["id"],"reason":"fresh verified external message needs authorized decision"},
+                                           {"event_id":row["id"],"reason":"fresh on first receipt; authorized agent decision required"},
                                            now,start_by=now+180,priority=scored[0]["score"] if scored else 25,
                                            event_id=row["id"])
                 self.queue.finish(item,self.clock(),evidence=evidence)
@@ -220,10 +237,15 @@ class Tick:
             work_due=self.db.read("SELECT 1 FROM work_items WHERE type='inspect_event' AND status IN ('pending','retry_wait') AND next_action_at<=? LIMIT 1",(start,))
             writes_due=self.config.allow_writes and self.db.read("SELECT 1 FROM outbox WHERE status IN ('prepared','unknown','retry_wait') AND next_attempt_at<=? LIMIT 1",(start,))
             needs_network=bool(not known or collection_due or scope_due or active_ids or work_due or writes_due)
-            # Reserve early execution time before bulk collectors can consume the budget.
-            if self.collector and needs_network:
+            # Reserve local work time before ANY network request if the DB
+            # already has a previously verified actor. Identity verification
+            # can consume/raise BudgetExceeded during an overloaded first tick.
+            # A new DB still verifies the actor before inspecting messages.
+            if self.collector and needs_network and not known:
                 self.actor=self.collector.identity()
             report["completed_work"]+=self.execute(max(1,self.config.max_work_per_tick//2))
+            if self.collector and needs_network and known:
+                self.actor=self.collector.identity()
             if self.client and needs_network:
                 report["outbox_attempts"]=self.outbox.process(self.clock(),self.can_send,self.send,self.verify)
                 ready=None
