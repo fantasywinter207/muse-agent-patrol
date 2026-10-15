@@ -5,4 +5,3 @@
 测试仅使用临时数据库和fake传输，不读取Credential Manager、不连接CrewQuay，不发送真实消息或ACK。
 Windows结果不能替代Linux flock/目录持久性验证。Worker独立结果记录在后续证据中，不能借用实现者日志。
 测试数量不作为正确性结论；每项故障用例应引用具体命令、源码SHA和结果。
-

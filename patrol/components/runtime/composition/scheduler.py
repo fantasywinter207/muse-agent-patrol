@@ -34,6 +34,10 @@ class Tick:
             return False,"explicit write authorization and current matching actor required"
         if row["action"] in ("send","read") and row["target"] not in self.config.allowed_chat_ids:
             return False,"chat outside explicit authorized scope"
+        if row["action"]=="read":
+            state=self.sync.state("messages",row["target"])
+            if state["covered_at"]<=0 or state["target"] is not None or int(row["payload"]["cursor"])>int(state["handled"]):
+                return False,"read cursor is not covered by durably handled messages"
         if row["action"]=="ack":
             if len(row["payload"]["ids"])==1 and not self.config.ack_single_enabled:
                 return False,"single ACK compatibility gate; retained without POST"
@@ -73,7 +77,9 @@ class Tick:
             ident=message.get("messageId") or message.get("id")
             if not ident:
                 return None
-            after=self.sync.state("messages",row["target"])["received"]
+            # A collector may already have advanced beyond this success message.
+            # Bounded replay may defer verification, but cannot confirm a text twin.
+            after=row.get("verify_cursor","0")
             for _ in range(self.config.max_pages_per_source):
                 r=self.client.request("GET","/api/v1/chats/"+quote(row["target"],safe="")+"/messages?after="+after+"&limit=100")
                 if r.status!=200 or not isinstance(r.body,dict):
@@ -83,6 +89,9 @@ class Tick:
                         self.attention.observe(row["target"],"own:"+ident,event_time(item.get("createdAt"),self.clock()),self.clock(),own=True)
                         return {"id":ident,"source":"REST message readback","sha256":hashlib.sha256(canonical(item).encode()).hexdigest()}
                 nxt=str(r.body.get("nextCursor",after))
+                if int(nxt)<int(after):
+                    return None
+                self.outbox.verified_page(row["id"],nxt)
                 if not r.body.get("hasMore") or nxt==after:
                     break
                 after=nxt
@@ -128,6 +137,8 @@ class Tick:
                         r=self.client.request("GET","/api/v1/tasks/"+quote(tid,safe=""))
                         if r.status not in (200,403,404):
                             raise RuntimeError("task refresh failed")
+                        if r.status==200 and (not isinstance(r.body,dict) or r.body.get("id")!=tid):
+                            raise ValueError("task resource identity mismatch")
                         evidence.update(http=r.status,kind="REST task refresh",resource_sha256=hashlib.sha256(canonical(r.body).encode()).hexdigest())
                     else:
                         # Unknown pointers must not be mislabeled as processed.
@@ -135,7 +146,7 @@ class Tick:
                         continue
                 elif row["source"]=="messages":
                     cid=row["scope"]
-                    external=value.get("senderId")!=self.actor and value.get("senderKind")!="system" and bool(value.get("content"))
+                    external=self.actor is not None and value.get("senderId")!=self.actor and value.get("senderKind")!="system" and bool(value.get("content"))
                     self.attention.observe(cid,row["external_key"],event_time(value.get("createdAt"),0),now,meaningful=external)
                     if external:
                         self.queue.enqueue("human:"+str(row["id"]),"human_action",{"event_id":row["id"],"reason":"external message requires authorized agent decision"},now,start_by=now+180)
@@ -157,16 +168,26 @@ class Tick:
             c.execute("INSERT INTO patrol_runs(id,started_at,status) VALUES(?,?,'running')",(self.run_id,start))
         ws=None
         report={"run_id":self.run_id,"started_at_utc_epoch":start,"completed_work":0,"alerts":[],"errors":[],"ws_connected":False}
+        alert_waterline=self.db.read("SELECT COALESCE(MAX(rowid),0) AS n FROM alerts")[0]["n"]
         try:
             self.queue.recover(start)
             self.outbox.recover(start,self.config.lease_seconds)
             self.attention.advance(start)
             report["alerts"]=self.promises.watchdog(start)
+            known=self.db.read("SELECT value FROM meta WHERE key='actor'")
+            self.actor=known[0]["value"] if known else None
+            due=self.attention.due(start)
+            active_ids=[r["target"] for r in due if r["state"]!="idle"]
+            collection_due=any(self.sync.state(source,"global")["next_at"]<=start
+                               for source in ("inbox","chats","tasks","updates","events"))
+            work_due=self.db.read("SELECT 1 FROM work_items WHERE type='inspect_event' AND status IN ('pending','retry_wait') AND next_action_at<=? LIMIT 1",(start,))
+            writes_due=self.config.allow_writes and self.db.read("SELECT 1 FROM outbox WHERE status IN ('prepared','unknown','retry_wait') AND next_attempt_at<=? LIMIT 1",(start,))
+            needs_network=bool(not known or collection_due or active_ids or work_due or writes_due)
             # Reserve early execution time before bulk collectors can consume the budget.
-            if self.collector:
+            if self.collector and needs_network:
                 self.actor=self.collector.identity()
             report["completed_work"]+=self.execute(max(1,self.config.max_work_per_tick//2))
-            if self.client:
+            if self.client and needs_network:
                 report["outbox_attempts"]=self.outbox.process(self.clock(),self.can_send,self.send,self.verify)
                 ready=None
                 if websocket:
@@ -183,8 +204,7 @@ class Tick:
                             ready=r.body
                         else:
                             self.errors.append({"code":"EVENT_WATERLINE_UNAVAILABLE","http":r.status})
-                due=self.attention.due(self.clock())
-                chat_ids=[r["target"] for r in due if r["state"]!="idle"]
+                chat_ids=active_ids
                 needs_resync=ready and (state["stream"]!=ready["streamId"] or int(state["received"])>int(ready["waterline"]))
                 if needs_resync:
                     with self.db.transaction() as c:
@@ -198,6 +218,7 @@ class Tick:
                             with self.db.transaction() as c:
                                 c.execute("DELETE FROM meta WHERE key='resync_since'")
                             report["resync"]="resources reloaded; cursor rebuilt"
+                            report["resync_complete"]=True
                         else:
                             report["resync"]="incomplete; prior cursor retained"
                     else:
@@ -208,7 +229,8 @@ class Tick:
                             # is required on the next tick, recorded explicitly rather than guessing.
                             with self.db.transaction() as c:
                                 c.execute("UPDATE sync_cursors SET stream='!resync-required' WHERE source='events' AND scope='global'")
-                    if ws and report.get("event_replay")=="complete":
+                            self.errors.append({"code":"RESYNC_REQUIRED_NEXT_TICK","checkpoint":"retained"})
+                    if ws and (report.get("event_replay")=="complete" or report.get("resync_complete")):
                         for _ in range(64):
                             if self.monotonic()>=self.request_deadline-1:
                                 break
@@ -239,6 +261,7 @@ class Tick:
         finally:
             if ws:
                 ws.close()
+            report["alerts"]=[{"kind":r["kind"],**json.loads(r["detail"])}
+                              for r in self.db.read("SELECT kind,detail FROM alerts WHERE rowid>? ORDER BY rowid",(alert_waterline,))]
             with self.db.transaction() as c:
                 c.execute("UPDATE patrol_runs SET ended_at=?,status=?,report=? WHERE id=?",(self.clock(),report.get("status","failed"),canonical(report),self.run_id))
-

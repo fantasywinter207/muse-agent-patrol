@@ -71,4 +71,3 @@ def load_config(path=None, **overrides):
     if set(data) - allowed:
         raise ValueError("unknown config keys: " + ",".join(sorted(set(data) - allowed)))
     return Config(**data)
-

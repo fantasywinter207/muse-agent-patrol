@@ -1,12 +1,31 @@
 """Import without modifying old files. Unknown ledger formats remain visible blocked work."""
 import hashlib
 import json
+import re
 from pathlib import Path
 from ...persistence.index import canonical, cursor
 from ...queue.index import enqueue_tx
 
 
 ALLOWED={"state.json","ws_pending.jsonl","promises.jsonl","patrol_runs.jsonl"}
+
+
+def has_credentials(value):
+    sensitive={"apikey","apitoken","authorization","credentials","credentialblob","password","passwd",
+               "clientsecret","secretkey","privatekey","accesstoken","refreshtoken","bearer","cookie","setcookie"}
+    if isinstance(value,dict):
+        for key,item in value.items():
+            normalized=re.sub(r"[^a-z0-9]","",str(key).lower())
+            if normalized in sensitive or has_credentials(item):
+                return True
+    elif isinstance(value,list):
+        return any(has_credentials(item) for item in value)
+    elif isinstance(value,str):
+        if "-----BEGIN " in value and "PRIVATE KEY-----" in value:
+            return True
+        if re.search(r"(?i)(authorization\s*:\s*bearer|api[_ -]?key\s*[:=])\s*\S+",value):
+            return True
+    return False
 
 
 def migrate_legacy(db, directory, now, stopped=False):
@@ -32,7 +51,7 @@ def migrate_legacy(db, directory, now, stopped=False):
                 if not isinstance(obj,dict):
                     raise ValueError("object required")
                 # Input source is retained untouched, including malformed lines.
-                if any(k.lower() in ("apikey","password","authorization","credentials") for k in obj):
+                if has_credentials(obj):
                     raise ValueError("credential material is outside migration scope")
                 entries.append((number,obj))
             except ValueError:
@@ -43,11 +62,11 @@ def migrate_legacy(db, directory, now, stopped=False):
     result=[]
     with db.transaction() as c:
         for name,digest,entries in records:
-            if c.execute("SELECT 1 FROM migrations WHERE source_hash=?",(digest,)).fetchone():
+            if c.execute("SELECT 1 FROM migrations WHERE source_hash=? AND source_name=?",(digest,name)).fetchone():
                 result.append({"source":name,"status":"already_imported"})
                 continue
             for line,obj in entries:
-                c.execute("INSERT INTO legacy_records VALUES(?,?,?)",(digest,line,canonical(obj)))
+                c.execute("INSERT INTO legacy_records VALUES(?,?,?) ON CONFLICT(source_hash,line_no) DO NOTHING",(digest,line,canonical(obj)))
                 if name=="state.json":
                     saved=cursor(str(obj.get("lastProcessedCursor","0")))
                     stream=str(obj.get("streamId") or "")
@@ -83,4 +102,3 @@ def migrate_legacy(db, directory, now, stopped=False):
             c.execute("INSERT INTO migrations VALUES(?,?,?,?)",(digest,name,now,len(entries)))
             result.append({"source":name,"sha256":digest,"records":len(entries),"status":"imported"})
     return {"imported":True,"sources":result,"manual_review":db.read("SELECT id,block_reason FROM work_items WHERE type='migration_review' AND status='blocked'")}
-

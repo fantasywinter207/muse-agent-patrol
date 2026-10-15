@@ -20,4 +20,3 @@ def connect_ready(config, secret):
     except BaseException:
         ws.close()
         raise
-

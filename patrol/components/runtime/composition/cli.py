@@ -1,5 +1,7 @@
 import argparse
 import importlib.metadata
+import importlib.util
+import hashlib
 import json
 import platform
 import sqlite3
@@ -73,6 +75,7 @@ def parser():
         a.add_argument("--"+name,required=True)
     a.add_argument("--due-at")
     a.add_argument("--kind",default="human_action")
+    a.add_argument("--work-id")
     a.add_argument("--reason")
     a=sub.add_parser("promise-progress")
     a.add_argument("id")
@@ -112,8 +115,12 @@ def main(argv=None):
                     ws_version=importlib.metadata.version("websocket-client")
                 except importlib.metadata.PackageNotFoundError:
                     ws_version=None
+                spec=importlib.util.find_spec("websocket") if ws_version else None
+                origin=spec.origin if spec else None
+                ws_hash=hashlib.sha256(Path(origin).read_bytes()).hexdigest() if origin and Path(origin).is_file() else None
                 result={"python":platform.python_version(),"platform":platform.system(),"sqlite":sqlite3.sqlite_version,
                     "journal":cfg.journal,"integrity":db.integrity(),"websocket_client":ws_version,
+                    "websocket_origin":origin,"websocket_entry_sha256":ws_hash,
                     "writes_enabled":cfg.allow_writes,"model_executor":False,
                     "scheduler":"external timer required; this command installs nothing"}
             elif args.command=="status":
@@ -143,7 +150,7 @@ def main(argv=None):
             elif args.command=="promise-add":
                 ident=Promises(db).create(args.actor,args.recipient,args.source_message_id,args.text,now,
                     timestamp(args.start_by),timestamp(args.next_action_at),timestamp(args.due_at),
-                    kind=args.kind,objective_reason=args.reason)
+                    work_id=args.work_id,kind=args.kind,objective_reason=args.reason)
                 result={"promise_id":ident}
             elif args.command=="promise-progress":
                 Promises(db).progress(args.id,now,evidence(args.evidence),timestamp(args.next_action_at))
@@ -170,4 +177,3 @@ def main(argv=None):
         # Exception bodies can contain server/credential data. Only the type is public.
         print(json.dumps({"status":"failed","error":type(e).__name__,"hint":"check configuration, schema and local evidence; no secrets printed"}))
         return 1
-

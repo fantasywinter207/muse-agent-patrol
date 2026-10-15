@@ -42,4 +42,3 @@ class Attention:
             row=c.execute("SELECT state FROM attention_sessions WHERE target=?",(target,)).fetchone()
             if row:
                 c.execute("UPDATE attention_sessions SET next_check_at=? WHERE target=?",(now+self.intervals[row[0]],target))
-

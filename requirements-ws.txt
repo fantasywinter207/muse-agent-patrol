@@ -1,4 +1,3 @@
 # Optional bounded WebSocket transport. Core REST/SQLite uses Python stdlib.
 # Source distribution SHA256 verified against official PyPI metadata.
 websocket-client==1.9.2 --hash=sha256:0fcb57545848be86992e128218fd96dd87a6769ffdb1a968dff79632b85604d0
-

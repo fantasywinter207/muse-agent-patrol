@@ -44,7 +44,7 @@ class Queue:
     def finish(self, item, now, evidence=None, status="done", reason=None, retry_at=None):
         if status not in ("done", "blocked", "needs_approval", "retry_wait"):
             raise ValueError("invalid work result")
-        if status == "done" and not evidence:
+        if status == "done" and (not isinstance(evidence,dict) or not evidence):
             raise ValueError("completion requires evidence")
         with self.db.transaction() as c:
             n = c.execute("""UPDATE work_items SET status=?,evidence=?,block_reason=?,next_action_at=?,
@@ -66,4 +66,3 @@ class Queue:
 
     def status(self):
         return self.db.read("SELECT status,count(*) AS count FROM work_items GROUP BY status")
-

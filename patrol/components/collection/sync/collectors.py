@@ -136,10 +136,15 @@ class Collector:
                 items=b
                 nxt=after
                 more=False
+                if source=="chats":
+                    ids=[v.get("conversationId") or v.get("id") for v in items if isinstance(v,dict)]
+                    with self.sync.db.transaction() as c:
+                        c.execute("INSERT INTO meta VALUES('visible_chats',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(canonical([v for v in ids if v]),))
             elif isinstance(b,dict) and isinstance(b.get("items"),list):
                 items=b["items"]
                 nxt=str(b.get("nextCursor",after))
-                more=bool(b.get("hasMore",False))
+                # Inbox/thread pages can omit hasMore: continue to a terminal page.
+                more=bool(b["hasMore"]) if "hasMore" in b else bool(items) and int(nxt)>int(after)
             else:
                 raise ValueError("unrecognized collection response; cursor retained")
             cursor(nxt)
@@ -159,13 +164,11 @@ class Collector:
         if chat_ids:
             ids.update(chat_ids)
         # Include every currently visible chat, not merely the last-message projection.
-        for row in self.sync.db.read("SELECT payload FROM events WHERE source='chats'"):
-            item=json.loads(row["payload"])
-            cid=item.get("conversationId") or item.get("id")
-            if cid:
-                ids.add(cid)
+        current=self.sync.db.read("SELECT value FROM meta WHERE key='visible_chats'")
+        if current:
+            ids.update(json.loads(current[0]["value"]))
         for cid in sorted(ids):
-            complete=self.pages("messages",cid,"/api/v1/chats/"+quote(cid,safe="")+"/messages",now,force,
+            complete=self.pages("messages",cid,"/api/v1/chats/"+quote(cid,safe="")+"/messages",now,force or bool(chat_ids and cid in chat_ids),
                                 self.config.active_scan_seconds if chat_ids and cid in chat_ids else None) and complete
         for pid in self.config.project_ids:
             for suffix in ("","/progress","/artifacts"):
@@ -210,9 +213,9 @@ class Collector:
             if int(nxt)>int(target) or (b.get("hasMore") and int(nxt)<=int(after)):
                 raise ValueError("invalid event coverage")
             done=not b.get("hasMore")
-            self.sync.page("events","global",stream,b["items"],target if done else nxt,now,target=None if done else target)
+            self.sync.page("events","global",stream,b["items"],target if done else nxt,now,target=None if done else target,
+                           next_at=now+self.config.normal_scan_seconds if done else now)
             if done:
                 return "complete"
             after=nxt
         return "incomplete"
-

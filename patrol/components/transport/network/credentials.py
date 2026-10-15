@@ -40,4 +40,3 @@ def credential_provider(config):
             raise RuntimeError("credential file has invalid shape")
         return value["apiKey"]
     return read
-

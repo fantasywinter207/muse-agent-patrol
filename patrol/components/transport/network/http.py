@@ -76,4 +76,3 @@ class Client:
             return Response(e.code,body,retry)
         except (OSError,ValueError):
             return Response(0,{"code":"TRANSPORT_FAILURE"})
-

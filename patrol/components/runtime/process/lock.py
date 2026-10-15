@@ -35,4 +35,3 @@ def instance_lock(path):
                 yield
             finally:
                 fcntl.flock(f,fcntl.LOCK_UN)
-

@@ -76,12 +76,13 @@ CREATE TABLE IF NOT EXISTS outbox(
  logical_key TEXT NOT NULL UNIQUE, idem_key TEXT NOT NULL UNIQUE, payload TEXT NOT NULL,
  payload_hash TEXT NOT NULL, status TEXT NOT NULL, created_at REAL NOT NULL,
  next_attempt_at REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
- remote_id TEXT, result TEXT, error TEXT, dispatch_owner TEXT, dispatch_at REAL);
+ remote_id TEXT, result TEXT, error TEXT, dispatch_owner TEXT, dispatch_at REAL,
+ verify_cursor TEXT NOT NULL DEFAULT '0');
 CREATE TABLE IF NOT EXISTS alerts(
  logical_key TEXT PRIMARY KEY, kind TEXT NOT NULL, detail TEXT NOT NULL, created_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS migrations(
- source_hash TEXT PRIMARY KEY, source_name TEXT NOT NULL, imported_at REAL NOT NULL,
- record_count INTEGER NOT NULL);
+ source_hash TEXT NOT NULL, source_name TEXT NOT NULL, imported_at REAL NOT NULL,
+ record_count INTEGER NOT NULL, PRIMARY KEY(source_name,source_hash));
 CREATE TABLE IF NOT EXISTS legacy_records(
  source_hash TEXT NOT NULL, line_no INTEGER NOT NULL, payload TEXT NOT NULL,
  PRIMARY KEY(source_hash,line_no));
@@ -162,4 +163,3 @@ class Database:
 
     def integrity(self):
         return self.read("PRAGMA integrity_check")
-

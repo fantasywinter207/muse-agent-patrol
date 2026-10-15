@@ -1,4 +1,5 @@
 import json
+import math
 from ...persistence.index import canonical, new_id
 from ...queue.index import enqueue_tx
 
@@ -7,14 +8,26 @@ class Promises:
     def __init__(self, db):
         self.db=db
 
+    @staticmethod
+    def _time(value):
+        if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<0:
+            raise ValueError("finite UTC epoch time required")
+
     def create(self, actor, recipient, source_message_id, text, now, start_by, next_action_at,
                due_at=None, work_id=None, kind="human_action", payload=None, objective_reason=None):
         if not actor or not recipient or not source_message_id or not text:
             raise ValueError("promise provenance required")
+        for value in (now,start_by,next_action_at):
+            self._time(value)
+        if due_at is not None:
+            self._time(due_at)
         if start_by is None or next_action_at is None or start_by<now or next_action_at<now:
             raise ValueError("explicit start_by and next_action_at required")
         if due_at is not None and due_at<start_by:
             raise ValueError("deadline precedes start")
+        start_limit={"simple":120,"normal":180,"complex":300}.get(kind,180)
+        if start_by-now>start_limit and not objective_reason:
+            raise ValueError("delayed first action requires an objective dependency reason")
         if kind=="simple" and due_at and due_at-now>900 and not objective_reason:
             raise ValueError("simple target over 15m requires objective explanation")
         ident=new_id()
@@ -37,6 +50,8 @@ class Promises:
         c.execute("INSERT INTO promise_history(promise_id,action,at,detail) VALUES(?,?,?,?)",(ident,action,now,canonical(detail)))
 
     def progress(self, ident, now, evidence, next_action_at):
+        self._time(now)
+        self._time(next_action_at)
         if not isinstance(evidence,dict) or not evidence or next_action_at<=now:
             raise ValueError("progress requires structured evidence and next action")
         with self.db.transaction() as c:
@@ -47,22 +62,34 @@ class Promises:
             self._history(c,ident,"progress",now,evidence)
 
     def request_extension(self, ident, due_at, reason, evidence, now):
+        self._time(now)
+        self._time(due_at)
         if not reason or not evidence:
             raise ValueError("extension needs reason and evidence")
         with self.db.transaction() as c:
             row=c.execute("SELECT * FROM promises WHERE id=? AND status!='done'",(ident,)).fetchone()
             if not row:
                 raise ValueError("unknown promise")
+            if due_at is None or due_at<=max(now,row["start_by"]) or (row["due_at"] is not None and due_at<=row["due_at"]):
+                raise ValueError("extension must be after current deadline, start and now")
             self._history(c,ident,"extension_requested",now,{"old_due_at":row["due_at"],"new_due_at":due_at,"reason":reason,"evidence":evidence})
 
     def approve_extension(self, ident, due_at, approved_by, approval_evidence, now):
+        self._time(now)
+        self._time(due_at)
         with self.db.transaction() as c:
             row=c.execute("SELECT * FROM promises WHERE id=? AND status!='done'",(ident,)).fetchone()
             if not row or approved_by==row["actor"] or not approved_by or not approval_evidence:
                 raise ValueError("independent approval identity and evidence required")
+            if approved_by!=row["recipient"]:
+                raise ValueError("only the original recipient may approve in this local workflow")
+            if due_at is None or due_at<=max(now,row["start_by"]) or (row["due_at"] is not None and due_at<=row["due_at"]):
+                raise ValueError("approved extension must be a future deadline")
             request=c.execute("SELECT detail FROM promise_history WHERE promise_id=? AND action='extension_requested' ORDER BY id DESC LIMIT 1",(ident,)).fetchone()
             if not request or json.loads(request[0])["new_due_at"]!=due_at:
                 raise ValueError("matching extension request required")
+            if row["due_at"] is not None and now>=row["due_at"]:
+                self._history(c,ident,"overdue_before_extension",now,{"missed_due_at":row["due_at"]})
             self._history(c,ident,"extension_approved",now,{"old_due_at":row["due_at"],"new_due_at":due_at,"approved_by":approved_by,"approval_evidence":approval_evidence})
             c.execute("UPDATE promises SET due_at=? WHERE id=?",(due_at,ident))
 
@@ -70,10 +97,16 @@ class Promises:
         if not isinstance(evidence,dict) or not evidence:
             raise ValueError("completion requires structured evidence")
         with self.db.transaction() as c:
-            if not c.execute("SELECT id FROM promises WHERE id=? AND status!='done'",(ident,)).fetchone():
+            row=c.execute("SELECT * FROM promises WHERE id=? AND status!='done'",(ident,)).fetchone()
+            if not row:
                 raise ValueError("unknown or completed promise")
+            active=c.execute("SELECT status FROM work_items WHERE id=?",(row["work_item_id"],)).fetchone()
+            if active and active["status"]=="running":
+                raise ValueError("cannot manually complete an actively leased work item")
             self._history(c,ident,"completed",now,evidence)
             c.execute("UPDATE promises SET status='done',completed_evidence=? WHERE id=?",(canonical(evidence),ident))
+            c.execute("UPDATE work_items SET status='done',evidence=?,last_progress_at=? WHERE id=?",
+                      (canonical(evidence),now,row["work_item_id"]))
 
     def watchdog(self, now):
         notices=[]
@@ -98,4 +131,3 @@ class Promises:
                 if tags:
                     c.execute("UPDATE promises SET status=? WHERE id=?",("overdue" if "overdue" in tags else tags[0],row["id"]))
         return notices
-

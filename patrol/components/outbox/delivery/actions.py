@@ -37,6 +37,13 @@ class Outbox:
             c.execute("""UPDATE outbox SET status='unknown',error='sender interrupted; reconcile remote result',
                 dispatch_owner=NULL WHERE status='sending' AND dispatch_at<=?""",(now-lease_seconds,))
 
+    def verified_page(self, ident, next_cursor):
+        next_cursor=cursor(next_cursor)
+        with self.db.transaction() as c:
+            old=c.execute("SELECT verify_cursor FROM outbox WHERE id=? AND status IN ('sending','unknown')",(ident,)).fetchone()
+            if old and int(next_cursor)>=int(old[0]):
+                c.execute("UPDATE outbox SET verify_cursor=? WHERE id=?",(next_cursor,ident))
+
     def process(self, now, can_send, send, verify, limit=3):
         report=[]
         for row in self.db.read("SELECT * FROM outbox WHERE status IN ('prepared','retry_wait','unknown') AND next_attempt_at<=? ORDER BY created_at LIMIT ?",(now,limit)):
@@ -101,6 +108,8 @@ class Outbox:
         with self.db.transaction() as c:
             c.execute("""UPDATE outbox SET status=?,next_attempt_at=?,error=?,dispatch_owner=NULL
                 WHERE id=? AND dispatch_owner=? AND status='sending'""",(status,next_at,error,ident,token))
+        if status in ("unknown","permanent_failed"):
+            self.db.alert("outbox:"+ident+":"+status,status,{"outbox_id":ident,"reason":error},next_at)
 
     def resolve(self, ident, evidence, now, confirmed=False, proven_absent=False):
         if not isinstance(evidence,dict) or not evidence or confirmed==proven_absent:
@@ -110,4 +119,3 @@ class Outbox:
                 WHERE id=? AND status='unknown'""",("confirmed" if confirmed else "prepared",canonical(evidence),now,ident)).rowcount
             if n!=1:
                 raise ValueError("unknown Outbox item required")
-

@@ -41,4 +41,3 @@ if __name__=="__main__":
     issues=validate(Path(__file__).resolve().parents[1]/"patrol")
     print("\n".join(issues) if issues else "RSMA recursive structure and public imports: PASS")
     raise SystemExit(bool(issues))
-
