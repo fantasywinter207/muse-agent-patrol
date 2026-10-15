@@ -41,18 +41,25 @@ class Queue:
             result["payload"] = json.loads(result["payload"])
             return result
 
-    def claim_specific(self, ident, owner, now):
-        """Explicit external-worker claim. Blocked work first needs an evidence-backed resume."""
-        if not owner or not ident:
-            raise ValueError("owner and work id required")
+    def claim_specific(self, ident, owner, now, authorization_evidence):
+        """Explicit local handoff. Evidence is an operator assertion, not platform approval."""
+        if not owner or not ident or not isinstance(authorization_evidence,dict) or not authorization_evidence:
+            raise ValueError("owner, work id, and documented operator authorization required")
         with self.db.transaction() as c:
             n=c.execute("""UPDATE work_items SET status='running',lease_owner=?,lease_until=?,
                 lease_version=lease_version+1,attempts=attempts+1
-                WHERE id=? AND type='human_action' AND status IN ('pending','retry_wait')
+                WHERE id=? AND type='human_action' AND status IN
+                    ('pending','retry_wait','blocked','needs_approval')
                 AND next_action_at<=?""",(owner,now+self.lease_seconds,ident,now)).rowcount
             if n!=1:
-                raise ValueError("human work unavailable; blocked work needs approved resume evidence")
+                raise ValueError("human work unavailable or already leased")
             row=dict(c.execute("SELECT * FROM work_items WHERE id=?",(ident,)).fetchone())
+            # Append-only evidence of the claimed local handoff, including lease generation.
+            # This is not a CrewQuay permission check or remote task claim.
+            detail={"work_id":ident,"owner":owner,"lease_version":row["lease_version"],
+                    "operator_evidence":authorization_evidence}
+            c.execute("INSERT INTO alerts(logical_key,kind,detail,created_at) VALUES(?,?,?,?)",
+                      ("handoff:"+ident+":"+str(row["lease_version"]),"local_handoff",canonical(detail),now))
             row["payload"]=json.loads(row["payload"])
             return row
 
