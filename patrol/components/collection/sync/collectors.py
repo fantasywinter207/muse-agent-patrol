@@ -52,7 +52,11 @@ class Sync:
                     VALUES(?,?,?,?,?,?,?) ON CONFLICT(source,scope,stream,external_key) DO NOTHING""",
                     (source,scope,stream,str(external),ec,canonical(item),now))
                 row=c.execute("SELECT id FROM events WHERE source=? AND scope=? AND stream=? AND external_key=?",(source,scope,stream,str(external))).fetchone()
-                enqueue_tx(c,"event:"+str(row[0]),"inspect_event",{"event_id":row[0]},now,event_id=row[0],start_by=now+180)
+                # Fresh REST message pages outrank historical inbox/task inspection
+                # without dropping or acknowledging any earlier cursor.
+                priority=500 if source=="messages" else 200 if source in ("events","live") else 0
+                enqueue_tx(c,"event:"+str(row[0]),"inspect_event",{"event_id":row[0]},
+                           now,event_id=row[0],start_by=now+180,priority=priority)
             c.execute("""INSERT INTO sync_cursors(source,scope,stream,received,target,next_at)
                 VALUES(?,?,?,?,?,?) ON CONFLICT(source,scope) DO UPDATE SET received=excluded.received,
                 target=excluded.target,next_at=excluded.next_at,failures=0""",
@@ -168,8 +172,9 @@ class Collector:
 
     def resources(self, now, force=False, chat_ids=None):
         complete=True
-        for source,path in (("inbox","/api/v1/inbox"),("chats","/api/v1/chats"),("tasks","/api/v1/tasks?mine=true"),("updates","/api/v1/updates")):
-            complete=self.pages(source,"global",path,now,force) and complete
+        # Discover visible chats first. Historical inbox may require many pages
+        # and must not consume the entire tick before any message is checked.
+        complete=self.pages("chats","global","/api/v1/chats",now,force) and complete
         ids=set(self.config.allowed_chat_ids)
         if chat_ids:
             ids.update(chat_ids)
@@ -189,6 +194,8 @@ class Collector:
         for cid in sorted(ids,key=chat_deadline):
             complete=self.pages("messages",cid,"/api/v1/chats/"+quote(cid,safe="")+"/messages",now,force or bool(chat_ids and cid in chat_ids),
                                 self.config.active_scan_seconds if chat_ids and cid in chat_ids else None) and complete
+        for source,path in (("inbox","/api/v1/inbox"),("tasks","/api/v1/tasks?mine=true"),("updates","/api/v1/updates")):
+            complete=self.pages(source,"global",path,now,force) and complete
         for pid in self.config.project_ids:
             for suffix in ("","/progress","/artifacts"):
                 snapshot=self.sync.state("projects",pid+suffix)
