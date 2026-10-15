@@ -95,7 +95,7 @@ os._exit(18)
         Sync(self.db).page("events","g","s",[{"eventId":"e","cursor":"1"}],"1",10)
         dst=self.root/"backup.sqlite3"
         self.db.backup(dst)
-        with sqlite3.connect(dst) as c:
+        with contextlib.closing(sqlite3.connect(dst)) as c:
             self.assertEqual(c.execute("SELECT count(*) FROM events").fetchone()[0],1)
         with self.assertRaises(ValueError):
             self.db.backup(dst)

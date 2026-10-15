@@ -100,6 +100,14 @@ class Collector:
         self.errors=[]
         self.resync_since=None
 
+    def _visible_chats(self, items, replace=False):
+        with self.sync.db.transaction() as c:
+            prior=c.execute("SELECT value FROM meta WHERE key='visible_chats'").fetchone()
+            ids=set() if replace or not prior else set(json.loads(prior[0]))
+            ids.update(v.get("conversationId") or v.get("id") for v in items if isinstance(v,dict))
+            ids.discard(None)
+            c.execute("INSERT INTO meta VALUES('visible_chats',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(canonical(sorted(ids)),))
+
     def identity(self):
         r=self.request("GET","/api/v1/agents/me")
         if r.status!=200 or not isinstance(r.body,dict) or not r.body.get("id"):
@@ -116,6 +124,8 @@ class Collector:
 
     def pages(self, source, scope, path, now, force=False, interval=None):
         state=self.sync.state(source,scope)
+        if state["failures"] and state["next_at"]>now:
+            return False
         if force and self.resync_since is not None and state["covered_at"]>=self.resync_since:
             return True
         if not force and state["next_at"]>now:
@@ -137,14 +147,14 @@ class Collector:
                 nxt=after
                 more=False
                 if source=="chats":
-                    ids=[v.get("conversationId") or v.get("id") for v in items if isinstance(v,dict)]
-                    with self.sync.db.transaction() as c:
-                        c.execute("INSERT INTO meta VALUES('visible_chats',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(canonical([v for v in ids if v]),))
+                    self._visible_chats(items,replace=True)
             elif isinstance(b,dict) and isinstance(b.get("items"),list):
                 items=b["items"]
                 nxt=str(b.get("nextCursor",after))
                 # Inbox/thread pages can omit hasMore: continue to a terminal page.
                 more=bool(b["hasMore"]) if "hasMore" in b else bool(items) and int(nxt)>int(after)
+                if source=="chats":
+                    self._visible_chats(items,replace=after=="0")
             else:
                 raise ValueError("unrecognized collection response; cursor retained")
             cursor(nxt)
