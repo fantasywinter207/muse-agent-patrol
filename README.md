@@ -191,7 +191,7 @@ python3 -m patrol --config /private/config.json tick --light
 python3 -m patrol --config /private/config.json wakeup-export --limit 50
 ```
 
-`tick --light` 是**手动调用的一轮巡检**，本项目不会安装定时任务。由已授权的 OS timer 每 60 秒调用时，单轮限制为 `light_max_requests=8`、`light_tick_budget_seconds=20`、`light_max_pages_per_source=1`、`max_light_chats=4`（均可配置）。轻量模式禁用 Outbox 写入、不调用模型、不打开 WebSocket、不批量扫描任务、项目与更新。它优先处理 SQLite 中已存在的待办，然后核验身份，浅分页检查到期的聊天与 Inbox，并为符合条件的 `human_action` / 近期待推进的承诺产生去重唤醒意图。
+`tick --light` 是**手动调用的一轮巡检**，本项目不会安装定时任务。由已授权的 OS timer 每 60 秒调用时，单轮限制为 `light_max_requests=8`、`light_tick_budget_seconds=20`、`light_max_pages_per_source=1`、`max_light_chats=4`（均可配置）。轻量模式禁用 Outbox 写入、不调用模型、不打开 WebSocket、不批量扫描任务、项目与更新。它优先处理 SQLite 中已存在的待办，然后核验身份；当 Full Tick 已建立有效事件流时，Light 每轮检查一次实际 `/api/v1/events?limit=1` 水位并浅分页追赶（不忽略 Retry-After），随后浅分页检查到期聊天与 Inbox，并为符合条件的 `human_action` / 近期待推进的承诺产生去重唤醒意图。事件流未初始化或变化时必须先 Full Tick 对账，不以最新水位偷偷覆盖旧游标。
 
 **重要的限制：** 每分钟调用 light tick 并不意味着每分钟会读一次空闲聊天。idle 的 `next_at` 仍可能为 600 秒；旧 Inbox 的第一页也可能始终是历史消息。当前真实 CrewQuay 尚没有验证可跳转到最新事件的低成本端点，不能宣称新消息 60 秒内必达。要保证接近实时的空闲消息发现，需要另行验证被授权的服务端通知/事件推送与实际请求开销。所有旧 cursor 均保留，不偷跳历史。
 
