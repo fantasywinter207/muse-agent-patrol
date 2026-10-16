@@ -20,14 +20,15 @@ class Scheduler:
         self.lease_seconds=lease_seconds
 
     @staticmethod
-    def _ready(c):
+    def _ready(c,now):
         return [dict(r) for r in c.execute(
             """SELECT a.* FROM schedule_activities a
                LEFT JOIN work_items w ON w.id=a.work_id
                WHERE a.status IN ('ready','suspended')
-                 AND (a.work_id IS NULL OR w.status IN
-                      ('pending','retry_wait','blocked','needs_approval'))
-               ORDER BY a.created_at,a.id""")]
+                 AND (a.work_id IS NULL OR (w.status IN
+                      ('pending','retry_wait','blocked','needs_approval')
+                      AND w.next_action_at<=?))
+               ORDER BY a.created_at,a.id""",(now,))]
 
     @staticmethod
     def _current(c):
@@ -140,7 +141,9 @@ class Scheduler:
     @staticmethod
     def _charge(c,row,now):
         elapsed=max(0.0,min(float(now),float(row["lease_until"])) -
-                    float(row["last_charged_at"] or row["last_started_at"] or now))
+                    float(row["last_charged_at"] if row["last_charged_at"] is not None
+                          else row["last_started_at"] if row["last_started_at"] is not None
+                          else now))
         if elapsed>0:
             c.execute("""UPDATE schedule_activities
                 SET cpu_seconds=cpu_seconds+?,
@@ -164,7 +167,7 @@ class Scheduler:
 
     def _assess_tx(self,c,now,mutate):
         current=self._current(c)
-        contenders=self._ready(c)
+        contenders=self._ready(c,now)
         best=self._best(contenders,now)
         mode=preemption(current,best,now) if current else None
         if current and mode and mutate and not current["preempt_requested"]:
@@ -209,7 +212,7 @@ class Scheduler:
             view=self._assess_tx(c,now,True)
             if view["running"]:
                 return {**view,"granted":False,"lease_recovered":expired}
-            best=self._best(self._ready(c),now)
+            best=self._best(self._ready(c,now),now)
             if best is None:
                 return {**view,"granted":False,"lease_recovered":expired}
             n=c.execute("""UPDATE schedule_activities SET status='running',
@@ -248,7 +251,7 @@ class Scheduler:
             self._charge(c,row,now)
             row=dict(c.execute("SELECT * FROM schedule_activities WHERE id=?",
                                (ident,)).fetchone())
-            contenders=self._best(self._ready(c),now)
+            contenders=self._best(self._ready(c,now),now)
             mode=preemption(row,contenders,now)
             suspended=bool(voluntary or row["preempt_requested"] or mode)
             if suspended:
