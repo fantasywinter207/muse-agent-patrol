@@ -5,6 +5,8 @@ No CrewQuay API requests, credentials, actual HATCH, or model invocation.
 import contextlib
 import io
 import json
+import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -111,6 +113,20 @@ class HostHandoffTests(unittest.TestCase):
         resumed=self.host.prepare("hatch",2001)
         self.assertTrue(resumed["should_wake"])
         self.assertEqual(resumed["source_id"],ident)
+
+    def test_hook_script_has_valid_shell_syntax_and_fenced_order(self):
+        source=Path(__file__).resolve().parents[1]/"tools"/"crewquay_phase3_hook.sh"
+        script=source.read_text(encoding="utf-8")
+        self.assertIn("host-wakeup-prepare",script)
+        self.assertIn("outbox-drain --once --lane any",script)
+        self.assertLess(script.index("host-wakeup-prepare"),
+                        script.index('wake "durable CrewQuay'))
+        self.assertIn("requires_host_receipt",Path(__file__).resolve().parents[1].joinpath(
+            "patrol/components/host/components/bridge.py").read_text(encoding="utf-8"))
+        self.assertNotIn('wakeup-ack --result accepted',script)
+        if shutil.which("bash"):
+            checked=subprocess.run(["bash","-n",str(source)],capture_output=True,text=True)
+            self.assertEqual(checked.returncode,0,checked.stderr)
 
     def test_empty_host_prepare_remains_local_without_extra_activity(self):
         report=self.host.prepare("hatch",1000)
