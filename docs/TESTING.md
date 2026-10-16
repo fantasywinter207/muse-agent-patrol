@@ -32,3 +32,6 @@ Windows结果不能替代Linux flock/目录持久性验证。Worker独立结果�
 `tests/test_phase2_light_wakeup.py` 使用无凭据的 SQLite / Fake HTTP 模拟：新消息浅抓取、一次性唤醒去重、blocked 工作需要 Muse 决策但仍未授权写入、租约版本防覆盖、crash unknown 不盲重发、带证据的失败/重试、承诺临近下次动作、无任务时静默、`tick --light --offline` 以及 BudgetExceeded 后保存本地工作和唤醒意图。
 
 注意：`wakeup_requests.status=accepted` 不是远程发消息，也不是业务完成。真实宿主 Hook 能力、定时器部署、消息 60 秒到达目标、长时间积压的恢复速度，都必须经 Owner 授权后在隔离环境另行验收。不可在 CI 中接入正式 CrewQuay 凭据。
+
+## Phase 2 BUG-1: invalid/non-progressing pagination
+`tests/test_phase2_invalid_cursor.py` includes the exact reported regression: initial `messages.received=1`, then `GET messages?after=1` returns `items=[]`, `nextCursor="0"`, `hasMore=false`. Both Light and Full tick must preserve received=1, record an invalid-page error/backoff, continue polling another source (Inbox) and record a truthful `degraded` run. Further tests cover regressive Event Stream cursors and unexpected `ValueError` resulting in persisted `failed` (not `partial`) for both run modes. Isolated Fake REST only; no proof a real service emits such a page.
