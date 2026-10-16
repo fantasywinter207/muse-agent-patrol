@@ -72,12 +72,27 @@ class Wakeups:
                 "warning":"A wakeup intention is not a host wakeup, worker execution, or authorization.",
                 "requests":rows}
 
-    def recover(self, now):
+    def recover(self, now, detail=False):
+        """Reconcile expired delivery leases against the CURRENT work state.
+
+        Once the business work is completed (or a promise was closed/rekeyed),
+        there is no remaining wakeup to deliver: retire the expired lease as
+        obsolete. Otherwise, delivery may have occurred before a crash and
+        remains unknown; NEVER silently retry that request.
+        """
+        totals={"unknown":0,"obsolete":0}
         with self.db.transaction() as c:
-            # Delivery may have succeeded before a crash. Never blindly resend.
-            return c.execute("""UPDATE wakeup_requests SET status='unknown',
-                lease_owner=NULL,lease_until=NULL
-                WHERE status='leased' AND lease_until<=?""",(now,)).rowcount
+            rows=c.execute("""SELECT * FROM wakeup_requests
+                WHERE status='leased' AND (lease_until IS NULL OR lease_until<=?)""",
+                (now,)).fetchall()
+            for row in rows:
+                new_status="unknown" if self._source_alive(c,row) else "obsolete"
+                count=c.execute("""UPDATE wakeup_requests SET status=?,
+                    lease_owner=NULL,lease_until=NULL WHERE id=? AND status='leased'
+                    AND (lease_until IS NULL OR lease_until<=?)""",
+                    (new_status,row["id"],now)).rowcount
+                totals[new_status]+=count
+        return totals if detail else totals["unknown"]+totals["obsolete"]
 
     def claim(self, ident, owner, now):
         if not ident or not isinstance(owner,str) or not owner.strip():
@@ -87,9 +102,20 @@ class Wakeups:
             if not row:
                 raise ValueError("unknown wakeup request")
             if not self._source_alive(c,row):
-                c.execute("""UPDATE wakeup_requests SET status='obsolete' WHERE id=?
-                    AND status IN ('pending','retry_wait')""",(ident,))
-                return {"id":ident,"status":"obsolete","host_called":False}
+                # Never report "obsolete" while an active delivery lease
+                # remains persisted. An expired lease may be safely retired
+                # because the underlying business work is already complete.
+                if row["status"]=="obsolete":
+                    return {"id":ident,"status":"obsolete","host_called":False}
+                n=c.execute("""UPDATE wakeup_requests SET status='obsolete',
+                    lease_owner=NULL,lease_until=NULL WHERE id=?
+                    AND (status IN ('pending','retry_wait','unknown')
+                         OR (status='leased' AND
+                             (lease_until IS NULL OR lease_until<=?)))""",
+                    (ident,now)).rowcount
+                if n:
+                    return {"id":ident,"status":"obsolete","host_called":False}
+                raise StaleLease("active or confirmed wakeup cannot be retired by claim")
             n=c.execute("""UPDATE wakeup_requests SET status='leased',lease_owner=?,
                 lease_until=?,lease_version=lease_version+1,attempts=attempts+1
                 WHERE id=? AND status IN ('pending','retry_wait') AND next_attempt_at<=?""",
