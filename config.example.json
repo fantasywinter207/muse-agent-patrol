@@ -16,6 +16,7 @@
   "project_ids": [],
   "allowed_project_action_ids": [],
   "allowed_task_actions": [],
+  "allowed_platform_actions": [],
   "ack_single_enabled": false,
   "ack_chat_map": {}
 }
