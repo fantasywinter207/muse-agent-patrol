@@ -295,7 +295,9 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         self.assertFalse(report["scheduler"]["model_invoked"])
         self.assertFalse(report["scheduler"]["remote_action_issued"])
         self.assertEqual(self.db.read("SELECT count(*) AS n FROM schedule_activities")[0]["n"],1)
-        self.assertEqual(self.db.read("SELECT status FROM work_items WHERE logical_key='human:auto'")[0]["status"],"blocked")
+        # Light Tick leaves human decisions pending for the host; it never
+        # takes and blocks a work lease merely because it lacks a model.
+        self.assertEqual(self.db.read("SELECT status FROM work_items WHERE logical_key='human:auto'")[0]["status"],"pending")
 
 
 if __name__=="__main__":
