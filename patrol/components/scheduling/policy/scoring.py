@@ -10,7 +10,7 @@ def priority(row, now, *, running=False):
         remaining=float(deadline)-now
         urgent=75.0 if remaining<=0 else max(0.0, 75.0*(1.0-remaining/3600.0))
     ready_since=float(row["ready_since"])
-    aging=min(30.0,max(0.0,(now-ready_since)/90.0))
+    aging=0.0 if running else min(30.0,max(0.0,(now-ready_since)/90.0))
     fair=min(34.0,max(0.0,float(row["virtual_runtime"])/60.0))
     # Do not thrash on small priority changes. Existing work retains some
     # continuity, while new resumptions pay a measured local restore penalty.
