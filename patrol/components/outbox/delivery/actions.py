@@ -1,4 +1,6 @@
 import hashlib
+import base64
+import binascii
 import json
 from ...persistence.index import canonical, new_id, cursor
 
@@ -10,7 +12,7 @@ class Outbox:
 
     def stage(self, logical, actor, action, target, payload, now, producer_id=None):
         if action not in ("send","ack","read","project_message","task_thread_reply","room_message",
-                          "task_claim","task_progress","task_submit","submission_review","project_decision") or not actor or not logical:
+                          "task_claim","task_progress","task_submit","submission_review","project_decision","artifact_upload") or not actor or not logical:
             raise ValueError("unsupported or unattributed action")
         if producer_id is not None and (not isinstance(producer_id,str) or not producer_id.strip() or len(producer_id)>128):
             raise ValueError("invalid audit producer ID")
@@ -56,6 +58,20 @@ class Outbox:
                     or not isinstance(payload["requiredChanges"],list) or len(payload["requiredChanges"])>30
                     or any(not isinstance(x,str) or not 1<=len(x)<=2000 for x in payload["requiredChanges"])):
                 raise ValueError("invalid submission review payload")
+        if action=="artifact_upload":
+            if (not isinstance(payload,dict) or set(payload)!={"filename","mediaType","contentBase64"}
+                    or not isinstance(payload["filename"],str) or not 1<=len(payload["filename"])<=100
+                    or payload["mediaType"] not in ("text/plain","text/markdown","application/json",
+                                                   "application/pdf","image/png","image/jpeg")
+                    or not isinstance(payload["contentBase64"],str)
+                    or not 1<=len(payload["contentBase64"])<=2800000):
+                raise ValueError("invalid project artifact body")
+            try:
+                binary=base64.b64decode(payload["contentBase64"],validate=True)
+            except (ValueError,binascii.Error):
+                raise ValueError("invalid artifact base64") from None
+            if not 1<=len(binary)<=2*1024*1024:
+                raise ValueError("artifact exceeds 2MiB limit")
         if action=="project_decision":
             if (not isinstance(payload,dict) or set(payload)!={"expectedPlannerEpoch","content"}
                     or type(payload["expectedPlannerEpoch"]) is not int or payload["expectedPlannerEpoch"]<=0
@@ -115,7 +131,7 @@ class Outbox:
         scope={"any":"","chat":" AND action='send'",
                "notifications":" AND action IN ('ack','read')",
                "collaboration":" AND action IN ('project_message','task_thread_reply','room_message')",
-               "tasks":" AND action IN ('task_claim','task_progress','task_submit','submission_review','project_decision')"}[lane]
+               "tasks":" AND action IN ('task_claim','task_progress','task_submit','submission_review','project_decision','artifact_upload')"}[lane]
         params=(now,action_id,scan_limit) if action_id is not None else (now,scan_limit)
         rows=self.db.read("""SELECT * FROM outbox
             WHERE status IN ('prepared','retry_wait','unknown')
