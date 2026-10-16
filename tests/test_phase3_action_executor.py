@@ -234,6 +234,37 @@ class Phase3Tests(unittest.TestCase):
         self.assertEqual(self.db.read("SELECT status FROM outbox WHERE id=?",(ack,))[0]["status"],"prepared")
         self.assertFalse(any("/inbox/ack" in x[1] for x in calls))
 
+    def test_real_cli_drain_path_uses_one_shot_verified_sender(self):
+        ident=self.stage(logical="cli-send")
+        config_path=Path(self.tmp.name)/"config.json"
+        config_path.write_text(json.dumps({"database":str(self.db.path),
+            "allow_writes":True,"allowed_chat_ids":["owner"]}),encoding="utf-8")
+        client,calls=self.fake_client()
+        out=io.StringIO()
+        with patch("patrol.components.runtime.composition.cli.Client",
+                   return_value=client), patch(
+                   "patrol.components.runtime.composition.cli.credential_provider",
+                   return_value=lambda:"never-used"):
+            with contextlib.redirect_stdout(out):
+                code=main(["--config",str(config_path),"outbox-drain",
+                           "--once","--id",ident,"--lane","chat","--limit","1"])
+        self.assertEqual(code,0,out.getvalue())
+        report=json.loads(out.getvalue())
+        self.assertEqual(report["item_status"],"confirmed",report)
+        self.assertEqual(len([x for x in calls if x[0]=="POST"]),1)
+
+    def test_unknown_remote_outcome_is_readback_only_and_not_posted_twice(self):
+        ident=self.stage(logical="unknown-once")
+        with self.db.transaction() as c:
+            c.execute("UPDATE outbox SET status='unknown',remote_id='remote-123' WHERE id=?",
+                      (ident,))
+        client,calls=self.fake_client()
+        report=ActionSender(self.db,self.cfg,client,clock=lambda:1000).drain_once(1,ident)
+        self.assertEqual(report["item_status"],"confirmed",report)
+        self.assertTrue(any(path.startswith("/api/v1/chats/owner/messages?")
+                            for method,path,_,__ in calls if method=="GET"))
+        self.assertFalse(any(method=="POST" for method,_,__,___ in calls))
+
     def test_task_thread_cannot_be_sent_via_chat_scope(self):
         ident=self.stage(target="task4-thread")
         client,calls=self.fake_client()
