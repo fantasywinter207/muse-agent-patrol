@@ -20,3 +20,9 @@ The producer of an Outbox action is distinct from the verified CrewQuay actor; t
 
 ## Testing
 Fake transport plus temporary SQLite. CI never calls CrewQuay endpoints or loads real credentials.
+
+## Phase 4: Platform routes
+
+`ActionSender` supports bounded `collaboration` and `tasks` lanes. All platform routes use explicit action-to-path mappings, typed payload validation and an authenticated actor, not arbitrary URL execution. Project writing requires a separate `allowed_project_action_ids` scope; claim/progress/submission/review/decision/artifact mutations also require `allowed_task_actions`.
+
+Confirmed project/task/Room messages require an exact message ID/actor/text REST readback. Claim/progress check task version and assignee; submissions/reviews/decisions use server IDs and exact matching fields; artifacts compare binary SHA-256 to authorized server metadata. Failure to prove identity remains `unknown` without blind POST replay.
