@@ -2,6 +2,8 @@
 # Reference Phase 3 HATCH Hook, not installed/enabled by this repository.
 # Hook: Python Light Tick + independent action-queue compensation + Muse wake.
 # Requires prior host approval for credentialed polling and authorized writes.
+# Fits the current ~60 s Hook script budget (25 s light + 25 s drain, plus
+# shell/SQLite overhead); long readbacks may require another compensation turn.
 set -euo pipefail
 source "${HATCH_HOOK_RUNTIME:?host Hook runtime required}"
 
@@ -18,14 +20,14 @@ if flock -n 9; then
   # No raw stdout/stderr in Hook logs; external content or stack traces could
   # contain secrets. The CLI itself already stores structured run reports.
   TICK_EXIT=0
-  (cd "$REPO" && timeout 30s python3 -m patrol \
+  (cd "$REPO" && timeout 25s python3 -m patrol \
     --config "$CONFIG" --db "$DB" tick --light >/dev/null 2>&1) || TICK_EXIT=$?
   log "phase3 light tick exit=${TICK_EXIT}"
 
   # Pure Python Executor, not a Muse worker. Only verified, authorized actions
   # can POST. An unknown remote result is readback-checked, never blindly resent.
   DRAIN_EXIT=0
-  (cd "$REPO" && timeout 40s python3 -m patrol \
+  (cd "$REPO" && timeout 25s python3 -m patrol \
     --config "$CONFIG" --db "$DB" outbox-drain --once --lane chat \
     --limit 3 >/dev/null 2>&1) || DRAIN_EXIT=$?
   log "phase3 executor compensation exit=${DRAIN_EXIT}"
