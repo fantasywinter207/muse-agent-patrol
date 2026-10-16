@@ -100,6 +100,32 @@ CREATE TABLE IF NOT EXISTS attention_sessions(
  last_activity_at REAL NOT NULL, own_until REAL NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS attention_consumed(
  target TEXT NOT NULL, event_key TEXT NOT NULL, PRIMARY KEY(target,event_key));
+-- Phase 6: additive, local scheduler state; never platform task grants.
+CREATE TABLE IF NOT EXISTS schedule_activities(
+ id TEXT PRIMARY KEY,logical_key TEXT NOT NULL UNIQUE,
+ kind TEXT NOT NULL CHECK(kind IN ('work','promise','social','research','maintenance')),
+ work_id TEXT UNIQUE REFERENCES work_items(id),
+ status TEXT NOT NULL CHECK(status IN ('ready','running','suspended','completed','cancelled')),
+ base_priority INTEGER NOT NULL CHECK(base_priority BETWEEN 0 AND 100),
+ weight INTEGER NOT NULL CHECK(weight BETWEEN 1 AND 100),
+ deadline REAL, switch_cost INTEGER NOT NULL CHECK(switch_cost BETWEEN 0 AND 30),
+ created_at REAL NOT NULL,ready_since REAL NOT NULL,last_updated REAL NOT NULL,
+ last_started_at REAL,last_charged_at REAL,
+ cpu_seconds REAL NOT NULL DEFAULT 0,virtual_runtime REAL NOT NULL DEFAULT 0,
+ lease_owner TEXT,lease_version INTEGER NOT NULL DEFAULT 0,
+ lease_until REAL,slice_until REAL,
+ preempt_requested INTEGER NOT NULL DEFAULT 0 CHECK(preempt_requested IN (0,1)),
+ preempt_mode TEXT,preempt_reason TEXT,checkpoint TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS schedule_one_running
+ ON schedule_activities(status) WHERE status='running';
+CREATE INDEX IF NOT EXISTS schedule_available ON
+ schedule_activities(status,ready_since);
+CREATE TABLE IF NOT EXISTS scheduled_outbox(
+ outbox_id TEXT PRIMARY KEY REFERENCES outbox(id) ON DELETE CASCADE,
+ schedule_id TEXT NOT NULL REFERENCES schedule_activities(id),
+ lease_generation INTEGER NOT NULL,owner TEXT NOT NULL,staged_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS outbox(
  id TEXT PRIMARY KEY, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL,
  logical_key TEXT NOT NULL UNIQUE, idem_key TEXT NOT NULL UNIQUE, payload TEXT NOT NULL,

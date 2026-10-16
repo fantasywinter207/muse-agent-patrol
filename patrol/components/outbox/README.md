@@ -40,3 +40,7 @@ Replies and task actions are confirmed only with exact server identity, content,
 ## Phase 5 platform lane
 
 The `platform_action` type persists a bounded, versioned action envelope as immutable JSON with matching target resource ID. `outbox-drain --once --lane platform` consumes this action without a client-side table of task/message URLs. A server-provided action name is not a local grant; the configured explicit action and project allowlists and the authenticated server apply in addition to the existing actor fencing, no-double-POST unknown reconciliation and SQLite durable evidence.
+
+## Phase 6 scheduler fencing
+
+`Outbox.stage(..., schedule_context={"id":..., "owner":..., "generation":...})` optionally binds a newly authored action to a live scheduler timeslice. The running state, lease owner, fencing generation, expiry, and absence of pending preemption are checked in the SAME SQLite transaction as the Outbox insertion. A valid binding is audit-recorded in `scheduled_outbox`. Already-staged effects are never deleted by scheduling; recovery and remote readback retain their existing semantics. Legacy action producers without a schedule_context retain their existing protocol.

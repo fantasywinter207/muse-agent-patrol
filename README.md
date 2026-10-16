@@ -284,6 +284,51 @@ python3 -m patrol --config /private/config.json outbox-drain \
 
 真实远程执行仅使用 `POST /api/v1/agent/actions/execute`；回执通过 `GET /api/v1/agent/executions/by-request/:requestId` 查询。哪怕 POST 响应丢失，也能用原 `requestId` 对账、避免重复执行；只有平台持久化回执确认为 `confirmed` 才完成本地 Outbox。Phase 4 固定动作入口继续兼容，二者共享相同数据库、幂等和权限边界。当前通用协议版本为 `1`，并不代表任意外部 URL 都能被执行。
 
+## Phase 6.1：可抢占的 Agent Activity Scheduler
+
+仓库新增 **独立的本地活动调度器**，协调 `work`、`social`、`research`、`promise` 和 `maintenance`，不修改 CrewQuay 的项目权限。现有 Light/Full Tick 会把需要 Muse 决策的 `human_action` 本地工作登记为调度候选，并给出安全点抢占建议；Tick **不会自行唤醒或强制中断模型**。
+
+动态评分结合基础重要性、距截止时间、排队老化、按权重计算的累计运行量和切换成本。时间片根据权重变化，且通过滞回避免短时间反复切换。活动由数据库统一管理，最多同时一个 `running`；同一活动使用严格的 `owner + lease_version + lease_until` fencing。
+
+```sh
+# 可注册独立社交/研究活动，也可登记已有的本地 work
+python3 -m patrol --config /private/config.json schedule-add \
+  --kind social --logical-key circle:topic-001 --priority 45 --weight 30
+python3 -m patrol --config /private/config.json schedule-sync --limit 100
+python3 -m patrol --config /private/config.json schedule-assess
+
+# 宿主 worker 显式领取一个可运行时间片（不会启动模型）
+python3 -m patrol --config /private/config.json schedule-next --owner muse-worker
+python3 -m patrol --config /private/config.json schedule-status --limit 50
+
+# 推理/工具调用安全点提交工作状态：请求抢占时转为 suspended
+python3 -m patrol --config /private/config.json schedule-checkpoint ACTIVITY_ID \
+  --owner muse-worker --generation GENERATION \
+  --state-file /private/checkpoint.json
+
+# 可以显式自愿让出时间片，也可以凭独立完成证据结束
+python3 -m patrol --config /private/config.json schedule-checkpoint ACTIVITY_ID \
+  --owner muse-worker --generation GENERATION \
+  --state-file /private/checkpoint.json --yield
+python3 -m patrol --config /private/config.json schedule-complete ACTIVITY_ID \
+  --owner muse-worker --generation GENERATION \
+  --evidence /private/activity-result.json
+```
+
+对新入队的业务动作可附加可选的安全代次门禁：
+
+```sh
+python3 -m patrol --config /private/config.json stage platform_action \
+  --logical-key source:message-001 --target TASK_ID \
+  --producer-id muse-worker --payload-file /private/action-envelope.json \
+  --schedule-id ACTIVITY_ID --schedule-owner muse-worker \
+  --schedule-generation GENERATION --dispatch-now
+```
+
+执行 `stage` 时，Outbox 在**同一 SQLite 事务**验证调度活动是否仍为当前运行者、是否存在抢占请求以及租约是否有效；验证失败不会创建新的待发送动作。已入队的动作仍由 Outbox 单独执行和对账；暂停活动不取消它的远端副作用。没有提供调度上下文的旧版 Outbox/Phase 3/4 CLI 路径保持兼容。
+
+抢占分为普通安全点、较高紧迫度安全点和临近截止安全点的不同请求模式，而不是杀死正在推理的进程。恢复依赖持久化的**业务检查点**，不代表能保存和恢复 LLM 隐藏推理状态，也不代表本地调度租约具有平台正式任务领取权限。详情见 [Scheduler 组件契约](patrol/components/scheduling/README.md)。
+
 ## 持久化与结果状态
 
 | 状态或记录 | 含义 |

@@ -9,6 +9,7 @@ from ...executor.index import ActionSender
 from ...persistence.index import canonical, new_id, Busy
 from ...promises.index import Promises
 from ...queue.index import Queue, MessageScores
+from ...scheduling.index import Scheduler
 from ...transport.index import BudgetExceeded, AuthError, connect_ready
 from ...wakeup.index import Wakeups
 
@@ -23,6 +24,7 @@ class Tick(ActionSender):
         self.monotonic=monotonic
         self.ws_factory=ws_factory
         self.queue=Queue(db,config.lease_seconds)
+        self.scheduler=Scheduler(db,config.lease_seconds)
         self.wakeups=Wakeups(db,config.lease_seconds)
         self.scores=MessageScores(db)
         self.promises=Promises(db)
@@ -221,6 +223,9 @@ class Tick(ActionSender):
                                      "error_type":type(e).__name__})
         finally:
             # These are local, idempotent SQLite transactions, even if HTTP failed.
+            # Only register/score local work and request cooperative safe
+            # points. The host must explicitly dispatch a model time slice.
+            report["scheduler"]=self.scheduler.reconcile(self.clock())
             report["wakeup_staged"]=self.wakeups.stage(self.clock(),
                 threshold=self.config.wakeup_min_score)
             report["wakeup_ready"]=len(self.db.read(
@@ -352,6 +357,7 @@ class Tick(ActionSender):
                 report["completed_work"]+=self.execute(self.config.max_work_per_tick)
                 report["errors"].extend(self.collector.errors)
             report["errors"].extend(self.errors)
+            report["scheduler"]=self.scheduler.reconcile(self.clock())
             report["wakeup_staged"]=self.wakeups.stage(self.clock(),threshold=self.config.wakeup_min_score)
             report["host_wakeups"]=0
             report["ended_at_utc_epoch"]=self.clock()
@@ -373,6 +379,7 @@ class Tick(ActionSender):
         finally:
             if "wakeup_staged" not in report:
                 # A deferred network tick can still have completed local work.
+                report["scheduler"]=self.scheduler.reconcile(self.clock())
                 report["wakeup_staged"]=self.wakeups.stage(
                     self.clock(),threshold=self.config.wakeup_min_score)
                 report["host_wakeups"]=0
