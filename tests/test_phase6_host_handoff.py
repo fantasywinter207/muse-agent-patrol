@@ -5,6 +5,7 @@ No CrewQuay API requests, credentials, actual HATCH, or model invocation.
 import contextlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -124,7 +125,10 @@ class HostHandoffTests(unittest.TestCase):
         self.assertIn("requires_host_receipt",Path(__file__).resolve().parents[1].joinpath(
             "patrol/components/host/components/bridge.py").read_text(encoding="utf-8"))
         self.assertNotIn('wakeup-ack --result accepted',script)
-        if shutil.which("bash"):
+        # Windows subprocess hands a native D:\\... path to Git Bash, which
+        # is not a valid Bash pathname. Validate the POSIX-only Hook on POSIX.
+        # Portable static invariants above still run on every platform.
+        if os.name=="posix" and shutil.which("bash"):
             checked=subprocess.run(["bash","-n",str(source)],capture_output=True,text=True)
             self.assertEqual(checked.returncode,0,checked.stderr)
 
