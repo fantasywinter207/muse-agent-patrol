@@ -107,6 +107,13 @@ CREATE TABLE IF NOT EXISTS outbox(
  next_attempt_at REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
  remote_id TEXT, result TEXT, error TEXT, dispatch_owner TEXT, dispatch_at REAL,
  verify_cursor TEXT NOT NULL DEFAULT '0');
+-- Agent workers draft actions, but only the verified CrewQuay actor may send.
+-- Separate immutable production provenance avoids treating a Hook worker
+-- name as a platform execution identity. Safe additive table for old v1 DBs.
+CREATE TABLE IF NOT EXISTS outbox_producers(
+ outbox_id TEXT PRIMARY KEY REFERENCES outbox(id) ON DELETE CASCADE,
+ producer_id TEXT NOT NULL, recorded_at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS outbox_ready ON outbox(status,next_attempt_at,created_at);
 CREATE TABLE IF NOT EXISTS alerts(
  logical_key TEXT PRIMARY KEY, kind TEXT NOT NULL, detail TEXT NOT NULL, created_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS migrations(
