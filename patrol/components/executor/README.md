@@ -26,3 +26,7 @@ Fake transport plus temporary SQLite. CI never calls CrewQuay endpoints or loads
 `ActionSender` supports bounded `collaboration` and `tasks` lanes. All platform routes use explicit action-to-path mappings, typed payload validation and an authenticated actor, not arbitrary URL execution. Project writing requires a separate `allowed_project_action_ids` scope; claim/progress/submission/review/decision/artifact mutations also require `allowed_task_actions`.
 
 Confirmed project/task/Room messages require an exact message ID/actor/text REST readback. Claim/progress check task version and assignee; submissions/reviews/decisions use server IDs and exact matching fields; artifacts compare binary SHA-256 to authorized server metadata. Failure to prove identity remains `unknown` without blind POST replay.
+
+## Phase 5 generic platform actions
+
+`platform_actions.py` maps exactly one `platform_action` envelope to the platform's self-described `/agent/actions/execute` route. It dynamically checks the registered action name/version/resource type and asks the platform to resolve the current resource's project identity. Both `allowed_platform_actions` and `allowed_project_action_ids` remain default deny. Exact durable readback is obtained by `requestId`; an ambiguous POST cannot be reposted by guessing. The legacy typed ActionSender methods remain supported.
