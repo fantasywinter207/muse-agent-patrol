@@ -227,7 +227,9 @@ class Tick:
                       (self.run_id,start))
         try:
             self.queue.recover(start)
-            report["wakeup_unknown_recovered"]=self.wakeups.recover(start)
+            wakeup_recovery=self.wakeups.recover(start,detail=True)
+            report["wakeup_unknown_recovered"]=wakeup_recovery["unknown"]
+            report["wakeup_obsolete_recovered"]=wakeup_recovery["obsolete"]
             self.attention.advance(start)
             report["promise_alerts"]=self.promises.watchdog(start)
             known=self.db.read("SELECT value FROM meta WHERE key='actor'")
@@ -354,6 +356,11 @@ class Tick:
         alert_waterline=self.db.read("SELECT COALESCE(MAX(rowid),0) AS n FROM alerts")[0]["n"]
         try:
             self.queue.recover(start)
+            # Full tick is also an entrypoint for recovery: a production
+            # executor must not depend on Light running to clear expired leases.
+            wakeup_recovery=self.wakeups.recover(start,detail=True)
+            report["wakeup_unknown_recovered"]=wakeup_recovery["unknown"]
+            report["wakeup_obsolete_recovered"]=wakeup_recovery["obsolete"]
             # Existing v3 databases already contain messages; score them in
             # bounded batches without losing history or modifying remote cursors.
             report["messages_backfilled"]=self.scores.backfill(limit=1000)
