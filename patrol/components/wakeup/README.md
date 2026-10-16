@@ -16,7 +16,7 @@ This package does not implement a Muse host Hook, a Cron installer, model execut
 `persistence.index` and published SQLite tables.
 
 ## Invariants
-One wakeup logical key is staged once. Leased delivery has owner/version/expiry. An expired attempt becomes `unknown`, never automatically retried; recovery requires proof of non-delivery. A blocked business work item may need attention but does not grant permission. Claiming intent never invokes an API.
+One wakeup logical key is staged once. Leased delivery has owner/version/expiry. An expired attempt whose business source still needs attention becomes `unknown`, never automatically retried without proof of non-delivery. An expired `leased` attempt whose work was already completed (or whose promise is closed/rekeyed) is atomically marked `obsolete`, not left indefinitely `leased`; active leases and acknowledged deliveries are not cancelled. Light and Full ticks both run this reconciliation. A blocked business work item may need attention but does not grant permission. Claiming intent never invokes an API.
 
 ## Testing boundary
 Temporary databases, fake host operations only. No external credentials or live writes.
