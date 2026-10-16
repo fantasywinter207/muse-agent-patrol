@@ -5,7 +5,7 @@ from urllib.parse import quote
 from ...attention.index import Attention
 from ...collection.index import Collector, Sync, event_time
 from ...outbox.index import Outbox
-from ...persistence.index import canonical, new_id
+from ...persistence.index import canonical, new_id, Busy
 from ...promises.index import Promises
 from ...queue.index import Queue, MessageScores
 from ...transport.index import BudgetExceeded, AuthError, connect_ready
@@ -310,6 +310,17 @@ class Tick:
         except (BudgetExceeded,AuthError) as e:
             report["status"]="deferred" if isinstance(e,BudgetExceeded) else "authorization_failed"
             report["errors"].append({"code":type(e).__name__})
+        except Busy:
+            # Preserve the CLI's dedicated exit=75 semantics for SQLite contention.
+            report["status"]="busy"
+            raise
+        except Exception as e:
+            # The CLI must report a failed tick, never a misleading successful
+            # 'partial' if an unexpected upstream payload escapes a collector.
+            # Do not serialize error text: it may contain external content.
+            report["status"]="failed"
+            report["errors"].append({"code":"UNEXPECTED_TICK_ERROR",
+                                     "error_type":type(e).__name__})
         finally:
             # These are local, idempotent SQLite transactions, even if HTTP failed.
             report["wakeup_staged"]=self.wakeups.stage(self.clock(),
@@ -447,6 +458,14 @@ class Tick:
         except (BudgetExceeded,AuthError) as e:
             report["status"]="deferred" if isinstance(e,BudgetExceeded) else "authorization_failed"
             report["errors"].append({"code":type(e).__name__})
+            return report
+        except Busy:
+            report["status"]="busy"
+            raise
+        except Exception as e:
+            report["status"]="failed"
+            report["errors"].append({"code":"UNEXPECTED_TICK_ERROR",
+                                     "error_type":type(e).__name__})
             return report
         finally:
             if "wakeup_staged" not in report:
