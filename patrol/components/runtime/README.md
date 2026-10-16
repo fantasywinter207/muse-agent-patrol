@@ -21,8 +21,9 @@ CLI与有界tick组合。
 ## Testing boundary
 通过公开边界使用临时数据库、fake HTTP/WS和真实多进程故障场景核验；不读取真实凭据、不访问业务API。
 
-## Phase 2 light tick
-`Tick.run(light=True)` 是现有 runtime 的模式，不增加第二个调度中心。以浅分页和请求时间预算优先检查已缓存的聊天，跳过历史全量任务/项目同步与远程 Outbox 发送。全量 `tick` 保持既有恢复职责；Light 与 Full 共享 SQLite、游标和文件锁。当前只实现尽力而为，空闲聊天的 600 秒扫描间隔以及初次历史数据积压仍可能影响发现时延。
+## Phase 5 event-only Light Tick
+
+`Tick.run(light=True)` uses the server-provided authenticated `/agent/events` feed exclusively for all remote discovery. No chats, Inbox, tasks/projects, old event-waterline probes, WS, or remote writes are executed as part of its normal event collection. The feed persists authorized message snapshots and non-message platform pointers as local inspect work; the same work/attention/score/wakeup components remain. Cursor pagination, backoff and incomplete-source reporting are independent of the Full Tick `events` checkpoint. Full Tick keeps its older resource sync/resync capabilities for completeness and compatibility.
 
 ## Validation BUG-1 recovery
 Light / Full ticks report malformed collector pages as `degraded` with structured per-source error evidence and unchanged cursor. Unexpected errors escaping collectors result in `failed` (with exception class only, never external exception text) and are recorded in `patrol_runs`, instead of reporting a misleading `partial` when an exception aborted a tick. SQLite `Busy` still propagates to the existing CLI status and exit 75. No live write is enabled.
@@ -31,4 +32,4 @@ Light / Full ticks report malformed collector pages as `degraded` with structure
 
 `stage --producer-id WORKER --dispatch-now` records an immutable authorized action first, releases `.tick.lock`, then runs a bounded separate `python -m patrol ... outbox-drain --once --id ACTION_ID` process. It does not grant the Muse worker platform authority and never sends an action from Light Tick. The Executor must GET and verify the CrewQuay actor and check target scope, ACK/read preconditions, exact remote readback and existing idempotency. `outbox-drain --once --lane chat|notifications|any --limit 3` is an independent bounded consumer, not another scanning scheduler. A Hook can invoke it periodically for compensation; Full Tick remains a recovery path until its separate responsibilities have a verified replacement.
 
-The old Muse 5-minute Executor Cron must not be disabled simply because this repository contains the CLI. A real authorized stage + dispatch + readback and Hook compensation test are necessary before changing host schedules. This repository never installs or changes host jobs.
+The runtime does not install background services or external job schedules.
