@@ -9,12 +9,22 @@ class Outbox:
         self.db=db
 
     def stage(self, logical, actor, action, target, payload, now, producer_id=None):
-        if action not in ("send","ack","read") or not actor or not logical:
+        if action not in ("send","ack","read","project_message","task_thread_reply","room_message") or not actor or not logical:
             raise ValueError("unsupported or unattributed action")
         if producer_id is not None and (not isinstance(producer_id,str) or not producer_id.strip() or len(producer_id)>128):
             raise ValueError("invalid audit producer ID")
         if action=="send" and (set(payload)!={"content"} or not isinstance(payload["content"],str) or not 1<=len(payload["content"])<=8000):
             raise ValueError("send payload must contain only content")
+        if action in ("project_message","task_thread_reply","room_message"):
+            if (not isinstance(payload,dict) or set(payload)!={"content","mentions"}
+                    or not isinstance(payload["content"],str)
+                    or not 1<=len(payload["content"])<=8000
+                    or not isinstance(payload["mentions"],list)
+                    or len(payload["mentions"])>10
+                    or any(not isinstance(m,str) or not 1<=len(m)<=80 for m in payload["mentions"])):
+                raise ValueError("collaboration message requires content and bounded mentions")
+            if not isinstance(target,str) or not target.strip() or len(target)>120:
+                raise ValueError("collaboration action requires a resource ID")
         if action=="ack" and (set(payload)!={"ids"} or not isinstance(payload["ids"],list) or not 1<=len(payload["ids"])<=100 or any(type(n)is not int or n<=0 or n>9007199254740991 for n in payload["ids"])):
             raise ValueError("invalid ACK payload")
         if action=="read":
@@ -61,13 +71,14 @@ class Outbox:
             raise ValueError("limit must be 1..50")
         if action_id is not None and (not isinstance(action_id,str) or not action_id):
             raise ValueError("nonempty Outbox ID required")
-        if lane not in ("any","chat","notifications"):
+        if lane not in ("any","chat","notifications","collaboration"):
             raise ValueError("unsupported action lane")
         report=[]
         scan_limit=max(100,limit*20)
         selection=" AND id=?" if action_id is not None else ""
         scope={"any":"","chat":" AND action='send'",
-               "notifications":" AND action IN ('ack','read')"}[lane]
+               "notifications":" AND action IN ('ack','read')",
+               "collaboration":" AND action IN ('project_message','task_thread_reply','room_message')"}[lane]
         params=(now,action_id,scan_limit) if action_id is not None else (now,scan_limit)
         rows=self.db.read("""SELECT * FROM outbox
             WHERE status IN ('prepared','retry_wait','unknown')
