@@ -19,7 +19,7 @@ class Wakeups:
                 FROM work_items w LEFT JOIN events e ON e.id=w.event_id
                 WHERE w.type='human_action'
                   AND w.status IN ('pending','retry_wait','blocked','needs_approval')
-                  AND w.priority>=? AND (w.event_id IS NULL OR e.source='messages')
+                  AND w.priority>=? AND (w.event_id IS NULL OR e.source IN ('messages','agent_events'))
                   AND NOT EXISTS(SELECT 1 FROM promises p WHERE p.work_item_id=w.id)
                 ORDER BY w.priority DESC,w.created_at LIMIT ?""",(threshold,limit)).fetchall()
             for w in works:
