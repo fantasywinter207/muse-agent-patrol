@@ -105,9 +105,17 @@ class Outbox:
         sha=hashlib.sha256(encoded.encode()).hexdigest()
         ident=new_id()
         with self.db.transaction() as c:
-            # The optional safe-point gate is checked IN THE SAME transaction
-            # that stages a remote action. A suspended or expired generation
-            # cannot race a fresh scheduler owner into the Outbox.
+            bound=c.execute("SELECT value FROM meta WHERE key='actor'").fetchone()
+            if bound and actor!=bound[0]:
+                raise ValueError("outbox action actor does not match verified CrewQuay actor; producer is audit-only")
+            row=c.execute("SELECT * FROM outbox WHERE logical_key=?",(logical,)).fetchone()
+            if row:
+                if (row["actor"],row["action"],row["target"],row["payload_hash"])!=(actor,action,target,sha):
+                    raise ValueError("logical action has different immutable request")
+                return row["id"]
+            # A genuinely new remote action must be fenced in the SAME
+            # transaction as insertion. Existing immutable actions are looked
+            # up first, even if the original activity has since yielded.
             if schedule_context is not None:
                 if (not isinstance(schedule_context,dict)
                         or set(schedule_context)!={"id","owner","generation"}
@@ -122,14 +130,6 @@ class Outbox:
                      schedule_context["generation"],now)).fetchone()
                 if live is None:
                     raise StaleLease("scheduler generation is suspended, preempt requested, stale or expired")
-            bound=c.execute("SELECT value FROM meta WHERE key='actor'").fetchone()
-            if bound and actor!=bound[0]:
-                raise ValueError("outbox action actor does not match verified CrewQuay actor; producer is audit-only")
-            row=c.execute("SELECT * FROM outbox WHERE logical_key=?",(logical,)).fetchone()
-            if row:
-                if (row["actor"],row["action"],row["target"],row["payload_hash"])!=(actor,action,target,sha):
-                    raise ValueError("logical action has different immutable request")
-                return row["id"]
             c.execute("""INSERT INTO outbox(id,actor,action,target,logical_key,idem_key,payload,payload_hash,status,created_at,next_attempt_at)
                 VALUES(?,?,?,?,?,?,?,?,'prepared',?,?)""",(ident,actor,action,target,logical,new_id(),encoded,sha,now,now))
             if producer_id is not None:
