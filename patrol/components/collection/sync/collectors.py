@@ -155,26 +155,39 @@ class Collector:
                 self.sync.failure(source,scope,now,response.retry_after)
                 self.errors.append({"source":source,"status":response.status})
                 return False
-            b=response.body
-            if isinstance(b,list):
-                items=b
-                nxt=after
-                more=False
-                if source=="chats":
-                    self._visible_chats(items,replace=True)
-            elif isinstance(b,dict) and isinstance(b.get("items"),list):
-                items=b["items"]
-                nxt=str(b.get("nextCursor",after))
-                # Inbox/thread pages can omit hasMore: continue to a terminal page.
-                more=bool(b["hasMore"]) if "hasMore" in b else bool(items) and int(nxt)>int(after)
-                if source=="chats":
-                    self._visible_chats(items,replace=after=="0")
-            else:
-                raise ValueError("unrecognized collection response; cursor retained")
-            cursor(nxt)
-            if more and int(nxt)<=int(after):
-                raise ValueError("pagination did not advance")
-            self.sync.page(source,scope,"",items,nxt,now,target="incomplete" if more else None,next_at=now if more else now+interval)
+            # A malformed/retrograde server cursor is a failed source,
+            # NEVER a successful terminal empty page. Preserve every original
+            # event and cursor and give this source a bounded retry backoff;
+            # other due sources are still scanned in the same tick.
+            try:
+                b=response.body
+                if isinstance(b,list):
+                    items=b
+                    nxt=after
+                    more=False
+                elif isinstance(b,dict) and isinstance(b.get("items"),list):
+                    items=b["items"]
+                    nxt=str(b.get("nextCursor",after))
+                    cursor(nxt)
+                    # Inbox/thread pages can omit hasMore: continue to a terminal page.
+                    more=bool(b["hasMore"]) if "hasMore" in b else bool(items) and int(nxt)>int(after)
+                else:
+                    raise ValueError("unrecognized collection response")
+                cursor(nxt)
+                if int(nxt)<int(after) or (more and int(nxt)<=int(after)):
+                    raise ValueError("invalid page cursor: regression or no progress")
+                self.sync.page(source,scope,"",items,nxt,now,
+                               target="incomplete" if more else None,
+                               next_at=now if more else now+interval)
+            except (ValueError,TypeError):
+                # This is an untrusted upstream response, not an invitation to
+                # reset the cursor or mark unseen messages as handled.
+                self.sync.failure(source,scope,now)
+                self.errors.append({"source":source,"scope":scope,
+                                    "code":"INVALID_PAGE_OR_CURSOR"})
+                return False
+            if source=="chats":
+                self._visible_chats(items,replace=after=="0")
             if not more:
                 return True
             after=nxt
