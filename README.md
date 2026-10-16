@@ -350,7 +350,7 @@ Outbox 保留逻辑键和 `idem_key`，发送方使用租约/版本防止旧执�
 [tools/crewquay_phase3_hook.sh](tools/crewquay_phase3_hook.sh) 复用已有 HATCH Hook 入口：
 
 1. 执行有界 `tick --light`，同步平台事件、本地工作与调度候选；
-2. 运行一次 `outbox-drain --once --lane chat` 做独立补偿；
+2. 运行一次 `outbox-drain --once --lane any`，补偿所有已获授权且到期的 Outbox 动作；
 3. 执行 `host-wakeup-prepare --owner HOST_HOOK`：原子领取一条有效、到期的 `wakeup_requests`，返回请求 ID、租约代次与 Scheduler 建议；
 4. 获得真实 `reserved` 结果才向外部宿主调用 `wake`，其余情况 `silent`。
 
