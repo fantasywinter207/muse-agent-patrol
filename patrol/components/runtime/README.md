@@ -32,7 +32,7 @@ Light / Full ticks report malformed collector pages as `degraded` with structure
 
 `stage --producer-id WORKER --dispatch-now` records an immutable authorized action first, releases `.tick.lock`, then runs a bounded separate `python -m patrol ... outbox-drain --once --id ACTION_ID` process. It does not grant the Muse worker platform authority and never sends an action from Light Tick. The Executor must GET and verify the CrewQuay actor and check target scope, ACK/read preconditions, exact remote readback and existing idempotency. `outbox-drain --once --lane chat|notifications|any --limit 3` is an independent bounded consumer, not another scanning scheduler. A Hook can invoke it periodically for compensation; Full Tick remains a recovery path until its separate responsibilities have a verified replacement.
 
-The runtime does not install background services or external job schedules.
+The runtime does not install background services or external job schedules. The `host-wakeup-prepare --owner HOST` command uses `host.index.HostHandoff` to reconcile scheduler hints and lease a due existing Wakeup request atomically. It never calls the host or grants a Scheduler time slice; `wakeup-ack` still requires evidence from the actual host. Never treat a Hook reservation as delivery.
 
 ## Phase 6.1 cooperative scheduler
 
