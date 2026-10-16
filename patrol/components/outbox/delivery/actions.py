@@ -52,7 +52,7 @@ class Outbox:
             if old and int(next_cursor)>=int(old[0]):
                 c.execute("UPDATE outbox SET verify_cursor=? WHERE id=?",(next_cursor,ident))
 
-    def process(self, now, can_send, send, verify, limit=3, action_id=None):
+    def process(self, now, can_send, send, verify, limit=3, action_id=None, lane="any"):
         """Process up to limit due actions without allowing blocked rows to starve
         later authorized work. An action_id narrows an immediate drain to one
         immutable request. The scan is bounded even under poisoned backlogs.
@@ -61,13 +61,17 @@ class Outbox:
             raise ValueError("limit must be 1..50")
         if action_id is not None and (not isinstance(action_id,str) or not action_id):
             raise ValueError("nonempty Outbox ID required")
+        if lane not in ("any","chat","notifications"):
+            raise ValueError("unsupported action lane")
         report=[]
         scan_limit=max(100,limit*20)
         selection=" AND id=?" if action_id is not None else ""
+        scope={"any":"","chat":" AND action='send'",
+               "notifications":" AND action IN ('ack','read')"}[lane]
         params=(now,action_id,scan_limit) if action_id is not None else (now,scan_limit)
         rows=self.db.read("""SELECT * FROM outbox
             WHERE status IN ('prepared','retry_wait','unknown')
-            AND next_attempt_at<=?"""+selection+
+            AND next_attempt_at<=?"""+selection+scope+
             " ORDER BY created_at LIMIT ?",params)
         consumed=0
         for row in rows:
