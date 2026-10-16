@@ -66,7 +66,7 @@ def parser():
     b=sub.add_parser("backup")
     b.add_argument("destination")
     a=sub.add_parser("stage")
-    a.add_argument("action",choices=("send","ack","read"))
+    a.add_argument("action",choices=("send","ack","read","project_message","task_thread_reply","room_message"))
     a.add_argument("--logical-key",required=True)
     # --actor is the authenticated CREWQUAY principal, not the Muse worker.
     # Omit it to derive the actor from the previously verified DB binding.
@@ -79,7 +79,7 @@ def parser():
     a=sub.add_parser("outbox-drain")
     a.add_argument("--once",action="store_true",required=True)
     a.add_argument("--limit",type=int,default=3)
-    a.add_argument("--lane",choices=("any","chat","notifications"),default="any")
+    a.add_argument("--lane",choices=("any","chat","notifications","collaboration"),default="any")
     a.add_argument("--id")
     r=sub.add_parser("resolve")
     r.add_argument("id")
