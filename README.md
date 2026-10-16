@@ -117,13 +117,21 @@ python3 -m patrol --config "$CONFIG" --db "$DB" stage send \
 
 行为精确定义：
 
-1. `stage` 根据数据库已绑定的平台 `meta.actor` 固定 `actor`，记录 Muse `producer_id`；校验动作、正文、逻辑键及原有授权边界。入队后获得 `outbox_id`。
+1. `stage` 根据数据库已绑定的平台 `meta.actor` 固定 `actor`，记录 Muse `producer_id`，校验动作、正文和逻辑键；**目标聊天的写入授权由后续 Executor 校验**。入队后获得 `outbox_id`。
 2. 写入原有 SQLite `outbox` 和可选 `outbox_producers` 审计记录，保存不可变 payload SHA 和幂等键。重复暂存同一个逻辑动作会复用原 ID；**相同逻辑键内容变更会被拒绝**。
 3. 显式 `--dispatch-now` 会在暂存事务与 CLI 文件锁释放后启动**独立 Python 子进程**，等价于针对该 ID 进行一次有界 `outbox-drain --once`。
 4. Executor **重新验证 CrewQuay 实际身份和目标范围**，进行 POST，按远端消息 ID、发送者与正文读回，写入 `confirmed` 及证据。
 5. 父进程再次查 SQLite；**只有数据库中的动作已 `confirmed` 才输出 `sent=true`**。子进程失败、超时或读回未完成不能声称送达。CLI `stage` 成功退出也仅代表动作已持久化。
 
 `--dispatch-now` 必须**显式**添加；不添加时只入队、不启动发送器。Muse 不需要直接调用聊天 POST，但它必须先具备合法的业务操作授权。**不要因为没有收到即时 `confirmed` 就换一个 `logical-key` 重发。**
+
+### Muse / Hook / Executor 的宿主指令应同步更新
+
+**Muse worker 的任务指令**应明确：从 `export-pending` / `wakeup-export` 获取真实待办，使用现有的合法 `work-claim` 和证据机制；获得业务授权后生成回复 JSON。**不要直接调用聊天 POST，不要把 worker 自身名称传入 `--actor`，不要自行改写旧 Outbox**。对于允许立即发送的私聊，固定业务 `logical-key`，执行 `stage send --producer-id ... --dispatch-now`，根据最终 SQLite `confirmed` 及远端读回再向 Owner 声称送达。未确认则只报告“已入队/待对账”，不换逻辑键二次暂存。
+
+**Hook 的任务指令**应明确：纯 Python `tick --light` 和有界 `outbox-drain --once --lane chat` 后，只有**到期唤醒意图**才调用宿主的 `wake`；没有就 `silent`。遇到 `partial/degraded` 不要上报为全量完成，也不要让 Hook 凭工作评分自行发送消息。
+
+**Executor 的任务指令**应明确：正常发送路径已经是 Python 命令 `outbox-drain`，并不需要 Muse 模型理解或改写回复；执行层只执行已登记、已授权、已到期的动作，保留原幂等键并进行读回验证。`Full Tick` / 五分钟 Cron 如继续存在，只作为独立同步与故障恢复职责，不能成为每条新回复的强制等待门槛。
 
 ### 独立消费者：手动指定动作或消费逻辑队列
 
