@@ -1,4 +1,6 @@
 import hashlib
+import base64
+import binascii
 import json
 from ...persistence.index import canonical, new_id, cursor
 
@@ -9,12 +11,72 @@ class Outbox:
         self.db=db
 
     def stage(self, logical, actor, action, target, payload, now, producer_id=None):
-        if action not in ("send","ack","read") or not actor or not logical:
+        if action not in ("send","ack","read","project_message","task_thread_reply","room_message",
+                          "task_claim","task_progress","task_submit","submission_review","project_decision","artifact_upload") or not actor or not logical:
             raise ValueError("unsupported or unattributed action")
         if producer_id is not None and (not isinstance(producer_id,str) or not producer_id.strip() or len(producer_id)>128):
             raise ValueError("invalid audit producer ID")
         if action=="send" and (set(payload)!={"content"} or not isinstance(payload["content"],str) or not 1<=len(payload["content"])<=8000):
             raise ValueError("send payload must contain only content")
+        if action in ("project_message","task_thread_reply","room_message"):
+            if (not isinstance(payload,dict) or set(payload)!={"content","mentions"}
+                    or not isinstance(payload["content"],str)
+                    or not 1<=len(payload["content"])<=8000
+                    or not isinstance(payload["mentions"],list)
+                    or len(payload["mentions"])>10
+                    or any(not isinstance(m,str) or not 1<=len(m)<=80 for m in payload["mentions"])):
+                raise ValueError("collaboration message requires content and bounded mentions")
+            if not isinstance(target,str) or not target.strip() or len(target)>120:
+                raise ValueError("collaboration action requires a resource ID")
+        if action=="task_claim":
+            if not isinstance(payload,dict) or set(payload)!={"expectedVersion"} or type(payload["expectedVersion"]) is not int or payload["expectedVersion"]<=0:
+                raise ValueError("task claim requires positive expectedVersion")
+        if action=="task_progress":
+            if (not isinstance(payload,dict) or set(payload)!={"expectedVersion","progress"}
+                    or type(payload["expectedVersion"]) is not int or payload["expectedVersion"]<=0
+                    or not isinstance(payload["progress"],str) or not 1<=len(payload["progress"])<=2000):
+                raise ValueError("task progress requires expectedVersion and progress")
+        if action=="task_submit":
+            if (not isinstance(payload,dict) or set(payload)!={"assignmentId","baseTaskVersion","summary","notes","artifacts"}
+                    or not isinstance(payload["assignmentId"],str) or not 1<=len(payload["assignmentId"])<=80
+                    or type(payload["baseTaskVersion"]) is not int or payload["baseTaskVersion"]<=0
+                    or not isinstance(payload["summary"],str) or not 1<=len(payload["summary"])<=10000
+                    or not isinstance(payload["notes"],str) or len(payload["notes"])>10000
+                    or not isinstance(payload["artifacts"],list) or len(payload["artifacts"])>20
+                    or any(not isinstance(x,dict) or set(x)!={"artifactId","sha256"}
+                           or not isinstance(x["artifactId"],str) or not 1<=len(x["artifactId"])<=80
+                           or not isinstance(x["sha256"],str) or len(x["sha256"])!=64
+                           or any(c not in "0123456789abcdef" for c in x["sha256"])
+                           for x in payload["artifacts"])):
+                raise ValueError("invalid task submission payload")
+        if action=="submission_review":
+            if (not isinstance(payload,dict)
+                    or set(payload)!={"taskId","decision","feedback","requiredChanges"}
+                    or not isinstance(payload["taskId"],str) or not 1<=len(payload["taskId"])<=120
+                    or payload["decision"] not in ("approve","request_revision")
+                    or not isinstance(payload["feedback"],str) or not 1<=len(payload["feedback"])<=10000
+                    or not isinstance(payload["requiredChanges"],list) or len(payload["requiredChanges"])>30
+                    or any(not isinstance(x,str) or not 1<=len(x)<=2000 for x in payload["requiredChanges"])):
+                raise ValueError("invalid submission review payload")
+        if action=="artifact_upload":
+            if (not isinstance(payload,dict) or set(payload)!={"filename","mediaType","contentBase64"}
+                    or not isinstance(payload["filename"],str) or not 1<=len(payload["filename"])<=100
+                    or payload["mediaType"] not in ("text/plain","text/markdown","application/json",
+                                                   "application/pdf","image/png","image/jpeg")
+                    or not isinstance(payload["contentBase64"],str)
+                    or not 1<=len(payload["contentBase64"])<=2800000):
+                raise ValueError("invalid project artifact body")
+            try:
+                binary=base64.b64decode(payload["contentBase64"],validate=True)
+            except (ValueError,binascii.Error):
+                raise ValueError("invalid artifact base64") from None
+            if not 1<=len(binary)<=2*1024*1024:
+                raise ValueError("artifact exceeds 2MiB limit")
+        if action=="project_decision":
+            if (not isinstance(payload,dict) or set(payload)!={"expectedPlannerEpoch","content"}
+                    or type(payload["expectedPlannerEpoch"]) is not int or payload["expectedPlannerEpoch"]<=0
+                    or not isinstance(payload["content"],str) or not 1<=len(payload["content"])<=10000):
+                raise ValueError("invalid project decision payload")
         if action=="ack" and (set(payload)!={"ids"} or not isinstance(payload["ids"],list) or not 1<=len(payload["ids"])<=100 or any(type(n)is not int or n<=0 or n>9007199254740991 for n in payload["ids"])):
             raise ValueError("invalid ACK payload")
         if action=="read":
@@ -61,13 +123,15 @@ class Outbox:
             raise ValueError("limit must be 1..50")
         if action_id is not None and (not isinstance(action_id,str) or not action_id):
             raise ValueError("nonempty Outbox ID required")
-        if lane not in ("any","chat","notifications"):
+        if lane not in ("any","chat","notifications","collaboration","tasks"):
             raise ValueError("unsupported action lane")
         report=[]
         scan_limit=max(100,limit*20)
         selection=" AND id=?" if action_id is not None else ""
         scope={"any":"","chat":" AND action='send'",
-               "notifications":" AND action IN ('ack','read')"}[lane]
+               "notifications":" AND action IN ('ack','read')",
+               "collaboration":" AND action IN ('project_message','task_thread_reply','room_message')",
+               "tasks":" AND action IN ('task_claim','task_progress','task_submit','submission_review','project_decision','artifact_upload')"}[lane]
         params=(now,action_id,scan_limit) if action_id is not None else (now,scan_limit)
         rows=self.db.read("""SELECT * FROM outbox
             WHERE status IN ('prepared','retry_wait','unknown')

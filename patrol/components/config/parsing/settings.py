@@ -35,6 +35,8 @@ class Config:
     actor_id: str = ""
     allowed_chat_ids: list = field(default_factory=list)
     project_ids: list = field(default_factory=list)
+    allowed_project_action_ids: list = field(default_factory=list)
+    allowed_task_actions: list = field(default_factory=list)
     ack_single_enabled: bool = False
     ack_chat_map: dict = field(default_factory=dict)
 
@@ -58,10 +60,12 @@ class Config:
             raise ValueError("request timeout must be below tick budget")
         if self.lease_seconds <= self.tick_budget_seconds:
             raise ValueError("lease must exceed tick budget")
-        for name in ("allowed_chat_ids", "project_ids"):
+        for name in ("allowed_chat_ids", "project_ids", "allowed_project_action_ids", "allowed_task_actions"):
             value = getattr(self, name)
             if not isinstance(value, list) or any(not isinstance(v, str) or not v for v in value):
                 raise ValueError("invalid scope list: " + name)
+        if set(self.allowed_task_actions)-{"task_claim","task_progress","task_submit","submission_review","project_decision","artifact_upload"}:
+            raise ValueError("unsupported allowed_task_actions value")
         if not isinstance(self.ack_chat_map, dict) or any(not isinstance(k, str) or not isinstance(v, list) or any(not isinstance(x, str) for x in v) for k,v in self.ack_chat_map.items()):
             raise ValueError("ack_chat_map must map notification types to configured chat ID lists")
         u = urlsplit(self.base_url)

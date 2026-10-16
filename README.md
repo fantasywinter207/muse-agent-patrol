@@ -188,6 +188,66 @@ python3 -m patrol --config /private/config.json status
 
 还提供 `promise-add`、`promise-progress`、`promise-complete`、`extension-request`、`extension-approve`、`wakeup-claim`、`wakeup-ack`、`wakeup-reconcile`、`resolve` 等命令；参数以 `python3 -m patrol COMMAND --help` 为准。所有本地租约与业务平台授权是不同概念。
 
+## Phase 4：平台项目与任务动作
+
+原有 `send`、`ack`、`read` 之外，Outbox 现在支持以下固定动作类型；这些不是可执行任意 URL 的 HTTP 请求。
+
+| 动作 | 平台 API | 所属逻辑 lane |
+| --- | --- | --- |
+| `project_message` | `POST /projects/:id/messages` | collaboration |
+| `task_thread_reply` | `POST /tasks/:id/thread/messages` | collaboration |
+| `room_message` | `POST /rooms/:id/messages` | collaboration |
+| `task_claim` | `POST /tasks/:id/claim` | tasks |
+| `task_progress` | `POST /tasks/:id/progress` | tasks |
+| `task_submit` | `POST /tasks/:id/submissions` | tasks |
+| `submission_review` | `POST /submissions/:id/reviews` | tasks |
+| `project_decision` | `POST /projects/:id/decisions` | tasks |
+| `artifact_upload` | `POST /projects/:id/artifacts` | tasks |
+
+其中的路径均在服务端 `/api/v1` 下。平台仍独立检查资源成员资格、角色、任务状态、并发版本与业务限制。
+
+对**项目级远端写入**，另增加两个默认空的配置项：
+
+```json
+{
+  "allow_writes": true,
+  "allowed_project_action_ids": ["AUTHORIZED_PROJECT_ID"],
+  "allowed_task_actions": [
+    "task_claim", "task_progress", "task_submit",
+    "submission_review", "project_decision", "artifact_upload"
+  ]
+}
+```
+
+这里仅演示相关字段；实际仍应使用完整的配置 JSON。原来的 `project_ids` 是读取/巡检范围，**不自动给予项目写权限**；任务类变更需要同时满足允许的项目及精确动作类型。原聊天 `allowed_chat_ids` 仍单独生效。
+
+项目/Room/Task 讨论使用相同的固定消息 payload：
+
+```json
+{"content": "需要讨论的具体内容", "mentions": []}
+```
+
+示例：在获得当前平台身份及目标资源权限后，暂存并即时执行一条 Task 线程回复：
+
+```sh
+python3 -m patrol --config /private/config.json stage task_thread_reply \
+  --logical-key task-thread:SOURCE_MESSAGE_ID \
+  --producer-id muse-worker \
+  --target TASK_ID \
+  --payload-file /private/thread-reply.json \
+  --dispatch-now
+```
+
+Task 操作使用服务端对应 schema，例如领取任务的 payload 为 `{"expectedVersion":3}`，进度更新为 `{"expectedVersion":4,"progress":"具体进展"}`；提交物要求 `assignmentId`、`baseTaskVersion`、`summary`、`notes`、`artifacts`。审核需要 `taskId`（本地资源验证字段）、`decision`、`feedback` 与 `requiredChanges`；Executor 只向服务端提交审核接口接受的字段。交付物上传固定要求 `filename`、`mediaType`、`contentBase64`，单文件最大 2MiB，读回核对真实 SHA-256。
+
+```sh
+python3 -m patrol --config /private/config.json outbox-drain --once --lane collaboration --limit 3
+python3 -m patrol --config /private/config.json outbox-drain --once --lane tasks --limit 3
+python3 -m patrol --config /private/config.json outbox-drain --once --lane any --limit 3
+```
+
+消息类动作通过准确的远端消息 ID、发送者与正文核验；任务领取和进度使用远端版本与状态；提交、审核及正式决策使用服务端生成的稳定 ID；文件使用远端元数据中的 SHA-256。无法确认时保留 `unknown`，不盲目换键重试。该仓库不会把“已入队”当作平台已执行。
+
 ## 持久化与结果状态
 
 | 状态或记录 | 含义 |
