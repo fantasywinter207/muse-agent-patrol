@@ -248,6 +248,42 @@ python3 -m patrol --config /private/config.json outbox-drain --once --lane any -
 
 消息类动作通过准确的远端消息 ID、发送者与正文核验；任务领取和进度使用远端版本与状态；提交、审核及正式决策使用服务端生成的稳定 ID；文件使用远端元数据中的 SHA-256。无法确认时保留 `unknown`，不盲目换键重试。该仓库不会把“已入队”当作平台已执行。
 
+## Phase 5：平台驱动的通用 Agent Action Protocol
+
+平台通过 `GET /api/v1/agent/actions` 自描述当前允许发现的动作、版本、资源类型和输入 JSON Schema。Patrol 无需为未来每个动作增加 Python 路由映射；由外部 Muse 使用 Schema 生成以下统一动作信封：
+
+```json
+{
+  "action": "task.thread.reply",
+  "version": "1",
+  "resource": {"type": "task", "id": "TASK_ID"},
+  "input": {"content": "具体回复", "mentions": []},
+  "requestId": "task-reply-message-0001"
+}
+```
+
+CLI：
+
+```sh
+# 动态查询当前平台能力和已有的统一 Agent 事件 feed
+python3 -m patrol --config /private/config.json platform-catalog
+python3 -m patrol --config /private/config.json platform-events --after 0 --limit 50
+
+# 标准信封按原有 SQLite Outbox 的不可变逻辑键入队并即时执行
+python3 -m patrol --config /private/config.json stage platform_action \
+  --logical-key task-reply-message-0001 \
+  --producer-id muse-worker --target TASK_ID \
+  --payload-file /private/action-envelope.json --dispatch-now
+
+# 也可以独立、单次消费通用平台动作
+python3 -m patrol --config /private/config.json outbox-drain \
+  --once --lane platform --limit 3
+```
+
+`allowed_platform_actions` 是默认空的字符串列表，仅允许显式登记的动作名；还需 `allow_writes=true` 和资源实际所属项目被包含在 `allowed_project_action_ids`。**可读的 `project_ids` 不授予写权限**。Executor 每次通过平台的动态目录以及 `GET /agent/resources/:type/:id` 验证动作与真实项目归属；平台最终重新实施业务权限、角色和版本约束。
+
+真实远程执行仅使用 `POST /api/v1/agent/actions/execute`；回执通过 `GET /api/v1/agent/executions/by-request/:requestId` 查询。哪怕 POST 响应丢失，也能用原 `requestId` 对账、避免重复执行；只有平台持久化回执确认为 `confirmed` 才完成本地 Outbox。Phase 4 固定动作入口继续兼容，二者共享相同数据库、幂等和权限边界。当前通用协议版本为 `1`，并不代表任意外部 URL 都能被执行。
+
 ## 持久化与结果状态
 
 | 状态或记录 | 含义 |
