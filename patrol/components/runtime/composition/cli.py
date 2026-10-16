@@ -12,6 +12,7 @@ from datetime import datetime
 from dataclasses import replace
 from pathlib import Path
 from ...config.index import load_config
+from ...host.index import HostHandoff
 from ...migration.index import migrate_legacy
 from ...outbox.index import Outbox
 from ...executor.index import ActionSender
@@ -134,6 +135,9 @@ def parser():
     a.add_argument("--actor",required=True)
     a.add_argument("--reason",required=True)
     a.add_argument("--evidence",required=True)
+    a=sub.add_parser("host-wakeup-prepare")
+    a.add_argument("--owner",required=True,
+                   help="approved HATCH Hook identifier, not a platform actor")
     a=sub.add_parser("wakeup-stage")
     a=sub.add_parser("wakeup-export")
     a.add_argument("--limit",type=int,default=50)
@@ -205,7 +209,7 @@ def main(argv=None):
         cfg=load_config(args.config,database=args.db)
         # File lock is stable across process exits and migrations. Never unlink it.
         with instance_lock(cfg.database+".tick.lock"):
-            if args.command in ("export-pending","work-claim","work-renew","work-finish","score-backfill","score-export","score-message","wakeup-stage","wakeup-export","wakeup-claim","wakeup-ack","wakeup-reconcile") and not Path(cfg.database).is_file():
+            if args.command in ("export-pending","work-claim","work-renew","work-finish","score-backfill","score-export","score-message","wakeup-stage","wakeup-export","wakeup-claim","wakeup-ack","wakeup-reconcile","host-wakeup-prepare") and not Path(cfg.database).is_file():
                 raise ValueError("Muse handoff requires an existing initialized database")
             db=Database(cfg.database,cfg.journal)
             now=time.time()
@@ -350,6 +354,8 @@ def main(argv=None):
                 result=MessageScores(db).rate(args.event_id,args.score,args.actor,
                                               args.reason,evidence(args.evidence),now)
             
+            elif args.command=="host-wakeup-prepare":
+                result=HostHandoff(db,cfg.lease_seconds).prepare(args.owner,now)
             elif args.command=="wakeup-stage":
                 result={"staged":Wakeups(db,cfg.lease_seconds).stage(now,threshold=cfg.wakeup_min_score),
                         "host_called":False}
