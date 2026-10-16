@@ -31,7 +31,11 @@ def main():
     commands=[[sys.executable,"-m","unittest","discover","-s","tests","-v"],[sys.executable,"tools/validate_architecture.py"]]
     for index,cmd in enumerate(commands):
         started=time.time()
-        r=subprocess.run(cmd,cwd=root,capture_output=True,text=True,timeout=180)
+        # Windows runner SQLite/file I/O under hosted CI can be markedly
+        # slower than Linux. Keep a finite cap, but avoid false-negative
+        # timeouts for a healthy full unit test suite.
+        deadline=300 if index==0 and platform.system()=="Windows" else 180
+        r=subprocess.run(cmd,cwd=root,capture_output=True,text=True,timeout=deadline)
         name="command-"+str(index+1)+".txt"
         raw="$ "+" ".join(cmd)+"\n"+r.stdout+"\n"+r.stderr+"\nexit="+str(r.returncode)+"\n"
         raw_bytes=raw.encode("utf-8")
