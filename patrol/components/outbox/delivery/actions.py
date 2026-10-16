@@ -12,7 +12,7 @@ class Outbox:
 
     def stage(self, logical, actor, action, target, payload, now, producer_id=None):
         if action not in ("send","ack","read","project_message","task_thread_reply","room_message",
-                          "task_claim","task_progress","task_submit","submission_review","project_decision","artifact_upload") or not actor or not logical:
+                          "task_claim","task_progress","task_submit","submission_review","project_decision","artifact_upload","platform_action") or not actor or not logical:
             raise ValueError("unsupported or unattributed action")
         if producer_id is not None and (not isinstance(producer_id,str) or not producer_id.strip() or len(producer_id)>128):
             raise ValueError("invalid audit producer ID")
@@ -28,6 +28,24 @@ class Outbox:
                 raise ValueError("collaboration message requires content and bounded mentions")
             if not isinstance(target,str) or not target.strip() or len(target)>120:
                 raise ValueError("collaboration action requires a resource ID")
+        if action=="platform_action":
+            import re
+            if (not isinstance(payload,dict) or
+                    set(payload)!={"action","version","resource","input","requestId"}
+                    or not isinstance(payload["action"],str)
+                    or re.fullmatch(r"[a-z][a-z0-9_.-]{2,99}",payload["action"]) is None
+                    or payload["version"]!="1"
+                    or not isinstance(payload["resource"],dict)
+                    or set(payload["resource"])!={"type","id"}
+                    or payload["resource"]["type"] not in ("project","task","room","submission")
+                    or not isinstance(payload["resource"]["id"],str)
+                    or not 1<=len(payload["resource"]["id"])<=120
+                    or payload["resource"]["id"]!=target
+                    or not isinstance(payload["input"],dict)
+                    or not isinstance(payload["requestId"],str)
+                    or re.fullmatch(r"[A-Za-z0-9._:-]{8,128}",payload["requestId"]) is None
+                    or len(canonical(payload).encode("utf-8"))>3000000):
+                raise ValueError("invalid Agent Action Protocol v1 envelope")
         if action=="task_claim":
             if not isinstance(payload,dict) or set(payload)!={"expectedVersion"} or type(payload["expectedVersion"]) is not int or payload["expectedVersion"]<=0:
                 raise ValueError("task claim requires positive expectedVersion")
@@ -123,7 +141,7 @@ class Outbox:
             raise ValueError("limit must be 1..50")
         if action_id is not None and (not isinstance(action_id,str) or not action_id):
             raise ValueError("nonempty Outbox ID required")
-        if lane not in ("any","chat","notifications","collaboration","tasks"):
+        if lane not in ("any","chat","notifications","collaboration","tasks","platform"):
             raise ValueError("unsupported action lane")
         report=[]
         scan_limit=max(100,limit*20)
@@ -131,7 +149,8 @@ class Outbox:
         scope={"any":"","chat":" AND action='send'",
                "notifications":" AND action IN ('ack','read')",
                "collaboration":" AND action IN ('project_message','task_thread_reply','room_message')",
-               "tasks":" AND action IN ('task_claim','task_progress','task_submit','submission_review','project_decision','artifact_upload')"}[lane]
+               "tasks":" AND action IN ('task_claim','task_progress','task_submit','submission_review','project_decision','artifact_upload')",
+               "platform":" AND action='platform_action'"}[lane]
         params=(now,action_id,scan_limit) if action_id is not None else (now,scan_limit)
         rows=self.db.read("""SELECT * FROM outbox
             WHERE status IN ('prepared','retry_wait','unknown')
