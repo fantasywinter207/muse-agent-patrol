@@ -217,6 +217,23 @@ class Phase3Tests(unittest.TestCase):
         self.assertFalse(tick.can_send(row)[0])
         self.assertFalse(ActionSender(self.db,self.cfg).can_send(row)[0])
 
+    def test_direct_staging_rejects_producer_as_bound_platform_actor(self):
+        with self.assertRaises(ValueError):
+            self.stage(actor="hook-worker",producer="hook-worker")
+        self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox")[0]["n"],0)
+
+    def test_chat_lane_does_not_consume_notification_action(self):
+        message=self.stage(logical="chat-response")
+        ack=self.outbox.stage("notif-ack","crewquay-agent","ack","",
+                              {"ids":[1]},1000,producer_id="muse-worker")
+        client,calls=self.fake_client()
+        result=ActionSender(self.db,self.cfg,client,clock=lambda:1000).drain_once(
+            limit=5,lane="chat")
+        self.assertEqual(result["confirmed"],1,result)
+        self.assertEqual(self.db.read("SELECT status FROM outbox WHERE id=?",(message,))[0]["status"],"confirmed")
+        self.assertEqual(self.db.read("SELECT status FROM outbox WHERE id=?",(ack,))[0]["status"],"prepared")
+        self.assertFalse(any("/inbox/ack" in x[1] for x in calls))
+
     def test_task_thread_cannot_be_sent_via_chat_scope(self):
         ident=self.stage(target="task4-thread")
         client,calls=self.fake_client()
