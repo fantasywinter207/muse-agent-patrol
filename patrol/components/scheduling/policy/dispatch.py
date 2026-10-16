@@ -97,9 +97,12 @@ class Scheduler:
                            ON p.work_item_id=w.id AND p.status!='done'
                          LEFT JOIN events e ON e.id=w.event_id
                          LEFT JOIN message_scores ms ON ms.event_id=w.event_id
+                         LEFT JOIN schedule_activities a ON a.work_id=w.id
                          WHERE w.type='human_action' AND w.status IN
                            ('pending','retry_wait','blocked','needs_approval')
-                         ORDER BY w.created_at LIMIT ?""",(limit,)).fetchall()
+                         ORDER BY CASE WHEN a.id IS NULL THEN 0 ELSE 1 END,
+                             COALESCE(a.last_updated,w.created_at),w.created_at
+                         LIMIT ?""",(limit,)).fetchall()
             for row in rows:
                 key="work:"+row["id"]
                 score=(row["message_score"] if row["event_source"]=="messages"
