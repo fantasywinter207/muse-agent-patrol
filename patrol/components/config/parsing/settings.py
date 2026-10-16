@@ -64,7 +64,7 @@ class Config:
             value = getattr(self, name)
             if not isinstance(value, list) or any(not isinstance(v, str) or not v for v in value):
                 raise ValueError("invalid scope list: " + name)
-        if set(self.allowed_task_actions)-{"task_claim","task_progress","task_submit","submission_review","project_decision"}:
+        if set(self.allowed_task_actions)-{"task_claim","task_progress","task_submit","submission_review","project_decision","artifact_upload"}:
             raise ValueError("unsupported allowed_task_actions value")
         if not isinstance(self.ack_chat_map, dict) or any(not isinstance(k, str) or not isinstance(v, list) or any(not isinstance(x, str) for x in v) for k,v in self.ack_chat_map.items()):
             raise ValueError("ack_chat_map must map notification types to configured chat ID lists")
