@@ -10,7 +10,7 @@ class Outbox:
     def __init__(self, db):
         self.db=db
 
-    def stage(self, logical, actor, action, target, payload, now, producer_id=None):
+    def stage(self, logical, actor, action, target, payload, now, producer_id=None, schedule_context=None):
         if action not in ("send","ack","read","project_message","task_thread_reply","room_message",
                           "task_claim","task_progress","task_submit","submission_review","project_decision","artifact_upload","platform_action") or not actor or not logical:
             raise ValueError("unsupported or unattributed action")
@@ -105,6 +105,23 @@ class Outbox:
         sha=hashlib.sha256(encoded.encode()).hexdigest()
         ident=new_id()
         with self.db.transaction() as c:
+            # The optional safe-point gate is checked IN THE SAME transaction
+            # that stages a remote action. A suspended or expired generation
+            # cannot race a fresh scheduler owner into the Outbox.
+            if schedule_context is not None:
+                if (not isinstance(schedule_context,dict)
+                        or set(schedule_context)!={"id","owner","generation"}
+                        or not isinstance(schedule_context["id"],str)
+                        or not isinstance(schedule_context["owner"],str)
+                        or type(schedule_context["generation"]) is not int):
+                    raise ValueError("invalid schedule fencing context")
+                live=c.execute("""SELECT id FROM schedule_activities
+                    WHERE id=? AND status='running' AND lease_owner=?
+                    AND lease_version=? AND lease_until>? AND preempt_requested=0""",
+                    (schedule_context["id"],schedule_context["owner"],
+                     schedule_context["generation"],now)).fetchone()
+                if live is None:
+                    raise StaleLease("scheduler generation is suspended, preempt requested, stale or expired")
             bound=c.execute("SELECT value FROM meta WHERE key='actor'").fetchone()
             if bound and actor!=bound[0]:
                 raise ValueError("outbox action actor does not match verified CrewQuay actor; producer is audit-only")
@@ -118,6 +135,10 @@ class Outbox:
             if producer_id is not None:
                 c.execute("""INSERT INTO outbox_producers(outbox_id,producer_id,recorded_at)
                     VALUES(?,?,?)""",(ident,producer_id,now))
+            if schedule_context is not None:
+                c.execute("""INSERT INTO scheduled_outbox(outbox_id,schedule_id,lease_generation,owner,staged_at)
+                    VALUES(?,?,?,?,?)""",(ident,schedule_context["id"],
+                        schedule_context["generation"],schedule_context["owner"],now))
             return ident
 
     def recover(self, now, lease_seconds):
