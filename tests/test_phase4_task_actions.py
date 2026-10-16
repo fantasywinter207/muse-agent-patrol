@@ -1,5 +1,7 @@
 """Typed platform task actions use real identity gates and exact fake REST evidence."""
 import tempfile
+import base64
+import hashlib
 import unittest
 from pathlib import Path
 
@@ -19,6 +21,7 @@ class TaskAPI:
         self.submissions=[]
         self.reviews=[]
         self.decisions=[]
+        self.artifacts=[]
 
     def request(self,method,path,payload=None,idem_key=None):
         self.calls.append((method,path,payload,idem_key))
@@ -30,6 +33,8 @@ class TaskAPI:
             return Response(200,self.submissions[:])
         if method=="GET" and path=="/api/v1/tasks/task42/reviews":
             return Response(200,self.reviews[:])
+        if method=="GET" and path=="/api/v1/artifacts/art1/metadata":
+            return Response(200,self.artifacts[0] if self.artifacts else {})
         if method=="GET" and path=="/api/v1/projects/proj/decisions":
             return Response(200,self.decisions[:])
         if method=="POST" and path=="/api/v1/tasks/task42/claim":
@@ -51,6 +56,11 @@ class TaskAPI:
             self.reviews.append(review)
             self.task["status"]="completed"
             return Response(201,review)
+        if method=="POST" and path=="/api/v1/projects/proj/artifacts":
+            artifact={"id":"art1","projectId":"proj","actorId":"actor",
+                "sha256":hashlib.sha256(base64.b64decode(payload["contentBase64"])).hexdigest()}
+            self.artifacts.append(artifact)
+            return Response(201,artifact)
         if method=="POST" and path=="/api/v1/projects/proj/decisions":
             decision={"id":"dec1","actorId":"actor","content":payload["content"]}
             self.decisions.append(decision)
@@ -68,7 +78,7 @@ class PlatformTaskActions(unittest.TestCase):
         self.cfg=Config(database=str(self.db.path),allow_writes=True,
             allowed_project_action_ids=["proj"],
             allowed_task_actions=["task_claim","task_progress","task_submit",
-                                  "submission_review","project_decision"])
+                                  "submission_review","project_decision","artifact_upload"])
         self.api=TaskAPI()
         self.outbox=Outbox(self.db)
 
@@ -124,6 +134,14 @@ class PlatformTaskActions(unittest.TestCase):
             "expectedPlannerEpoch":1,"content":"Approved scope"})
         self.assert_confirmed(self.drain(ident))
         self.assertEqual(len(self.api.decisions),1)
+
+    def test_artifact_upload_has_exact_remote_digest_proof(self):
+        ident=self.stage("artifact42","artifact_upload","proj",{
+            "filename":"report.txt","mediaType":"text/plain",
+            "contentBase64":base64.b64encode(b"Verified artifact").decode()})
+        self.assert_confirmed(self.drain(ident))
+        self.assertEqual(self.api.artifacts[0]["sha256"],
+                         hashlib.sha256(b"Verified artifact").hexdigest())
 
     def test_mutations_default_deny_even_when_chat_writes_enabled(self):
         ident=self.stage("not-granted","task_claim","task42",{"expectedVersion":1})
