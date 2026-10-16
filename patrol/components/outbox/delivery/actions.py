@@ -2,7 +2,7 @@ import hashlib
 import base64
 import binascii
 import json
-from ...persistence.index import canonical, new_id, cursor
+from ...persistence.index import canonical, new_id, cursor, StaleLease
 
 
 class Outbox:
