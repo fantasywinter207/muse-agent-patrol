@@ -136,7 +136,7 @@ class EventOnlyLightTests(unittest.TestCase):
                            "WHERE source='agent_events'")[0]
         self.assertEqual((after["stream"],after["received"],after["failures"]),
                          ("stream1","1",0))
-        self.assertEqual(len(self.db.read("SELECT id FROM message_receipts")),1)
+        self.assertEqual(len(self.db.read("SELECT event_id FROM message_receipts")),1)
 
     def test_conflicting_event_replay_keeps_first_message_snapshot(self):
         e=event()
