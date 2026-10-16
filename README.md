@@ -1,249 +1,221 @@
-# CrewQuay v3 — Hook 感知 · Muse 决策 · Python Executor 执行
+# CrewQuay v3 — SQLite 驱动的 Agent 巡检与动作执行
 
-CrewQuay v3 是基于 **Python + SQLite** 的 Agent 工作调度客户端。**当前推荐运行架构为 Phase 3**：
+CrewQuay v3 是一个 Python 客户端，围绕 **SQLite 持久化状态、事件巡检、Agent 工作队列、Muse 唤醒意图与远端动作 Outbox** 构建。当前主架构为 **Hook 感知 → Muse 决策 → Outbox 入队 → Python Executor 执行**（Phase 3）。
 
-- **Hook / Light Tick（感知层）**：低成本、限量读取 CrewQuay 消息与事件；写入 SQLite，按工作优先级产生去重唤醒意图；没有必要时保持 `silent`。
-- **Muse（决策层）**：被宿主合法唤醒后读取待办、理解上下文、评分、领取并处理工作，生成明确的动作；不必直接操作远端发送 API。
-- **SQLite Outbox（动作边界）**：持久化不可变动作、来源、目标、授权身份、幂等键、租约和执行状态。
-- **Python Executor（执行层）**：独立消费已入队动作，核对实际 CrewQuay 平台身份与允许的目标，再 POST、按远端 ID/发送者/正文读回确认。**不调用模型**。
-- **Hook 补偿 / Full Tick 恢复**：即时投递未完成时由 Hook 下一轮进行有界补偿；Full Tick 保留资源全量同步、历史积压、退避及其他恢复职责。
+仓库提供 CLI、状态管理和动作执行能力；Muse 模型推理和宿主 Hook 的运行机制不在本仓库内实现。
 
-**默认没有写权限。** GitHub 合并代码不代表宿主已升级、Hook 已安装或 Muse 已经被唤醒。仓库不负责替操作者部署生产任务、修改 Cron、授权写操作。所有主动回复都需要真实授权，且 `stage`、进程退出码 0 或 Hook `wake` **均不等于成功送达**；只以持久化 `confirmed` 和远端读回证据为准。
-
-## 当前运行结构
+## 架构
 
 ```text
-CrewQuay API (chat / inbox / events / tasks)
-              │ GET，受预算/退避限制
-              ▼
-宿主 Hook ──> python -m patrol tick --light  ──> SQLite
-              │                                  ├─ events / receipts / scores
-              │                                  ├─ work_items / promises
-              │                                  └─ wakeup_requests
-              └── pending 意图? ── silent / wake ──> Muse worker
-                                                     │
-                                               决策、领取、保存证据
-                                                     │
-                                           stage send --dispatch-now
-                                                     ▼
-                                           SQLite Outbox (prepared)
-                                                     │ 已提交且释放锁
-                                                     ▼
-                                     独立 Python outbox-drain --once
-                                                     │
-                                         身份/目标范围/幂等校验
-                                                     ▼
-                                        CrewQuay POST → REST 读回
-                                                     │
-                                         confirmed / unknown / failed
-
-补偿：Hook 每轮单独运行 outbox-drain --once --lane chat；
-恢复：Full Tick 仍负责历史采集、重同步、租约和承诺等。
+CrewQuay API
+     │ REST / 可选 WS
+     ▼
+Light Tick（事件/消息采集与本地处理）
+     │
+     ▼
+SQLite ─ events / message_receipts / message_scores
+       ├ work_items / promises / attention_sessions
+       └ wakeup_requests ──> 宿主 Hook ──> Muse 决策
+                                              │
+                                       stage send
+                                              ▼
+                                        SQLite Outbox
+                                              │
+                            --dispatch-now / outbox-drain --once
+                                              ▼
+                                       Python Executor
+                                              │
+                         身份与范围检查 → POST → REST 读回
+                                              ▼
+                                   confirmed / unknown / failed
 ```
 
-`tick --light` 本身 **强制关闭远程写**。发送不再等待“五分钟 Muse Executor Cron”作为正常路径。只要真实宿主支持 Hook 与凭据化 Python Executor，日常消息投递便可由 Muse 入队后的独立消费者完成；**不要在验证恢复能力之前直接删除原 Full Tick / 其他定时任务**。
+三个边界各自负责不同的事情：
 
-### 身份模型：这是 Phase 3 的关键修复
+- **Patrol / Light Tick**：有界读取与本地事件处理，生成工作、评分、承诺提醒和唤醒意图。轻量模式不发送远端写请求。
+- **Muse 侧的决策输入/输出**：从只读工作 feed 取得待办；通过显式 CLI 提交评分、工作进展和确定的动作。仓库不托管大模型。
+- **Outbox / Executor**：Outbox 保存动作及其幂等身份；Executor 单独校验权限、投递并核验远端结果，无需运行完整巡检。
 
-| 名称 | 作用 | 是否有远程写权限 |
-| --- | --- | --- |
-| `producer_id` | 哪个 Muse / Hook worker 起草并登记动作，仅作审计 | **不能据此获得权限** |
-| `actor` / `meta.actor` | 先前由 CrewQuay REST 验证的**平台 Agent 身份** | 仍需运行时身份匹配、`allow_writes` 与目标范围校验 |
-| Executor 进程 | 读取动作、凭自身获授权的凭据执行和读回 | 只能在既有平台身份及目标授权范围内 |
+`Full Tick` 仍是仓库内的完整采集、同步和恢复入口；与独立 Executor 复用同一套远端写入校验和 Outbox 状态机制。
 
-**禁止用 `--actor quill-wakeup-worker` 一类本地 worker 名称暂存发送动作。** 现在 `stage` 可省略 `--actor`，自动从当前数据库绑定的 `meta.actor` 读取平台身份；提供了不一致的 `--actor` 则在入队前报错。请把 worker 名称放到 `--producer-id`。独立消费者每次真正执行前仍会重新核验平台身份。错误的旧 `prepared` 不会被静默改写或重新发送。
+## 组件
 
-## 快速开始：使用现有生产数据前先核对配置
+| 模块 | 职责 |
+| --- | --- |
+| `collection` | REST/WS 采集、分页游标、水位线与退避 |
+| `persistence` | SQLite schema、事务、备份与持久状态 |
+| `queue` | 工作入队、租约、评分与待办导出 |
+| `attention` | 活跃期、冷却期与采集时机 |
+| `promises` | 承诺、进展、期限与 Watchdog 告警 |
+| `wakeup` | 去重唤醒意图、领取、回执与租约恢复 |
+| `outbox` | 不可变动作、幂等键、发送状态及证据 |
+| `executor` | 独立发送、身份/范围检查和读回验证 |
+| `runtime` | CLI、Light/Full Tick 编排和稳定进程锁 |
 
-Python 3.10+；核心使用标准库。以**实际生产环境中已核实的路径**为准，下例路径只是占位符：
+组件使用各自的 `index.py` 公开接口；详见 [责任根](patrol/README.md)、[Runtime](patrol/components/runtime/README.md)、[Outbox](patrol/components/outbox/README.md) 与 [Executor](patrol/components/executor/README.md)。
+
+## 环境与配置
+
+- Python **3.10+**，核心功能基于标准库。
+- SQLite 是唯一活动状态源；数据库路径默认 `~/.crewquay/patrol-v3.sqlite3`，CLI 可通过 `--db` 覆盖。
+- SQLite 默认采用 `DELETE + synchronous=FULL`。可选 WAL 受程序对 SQLite 已修复版本的检查限制。
+- WebSocket 是可选依赖；配置见 `requirements-ws.txt`。
+- [config.example.json](config.example.json) 列出配置字段。
+
+示例：
 
 ```sh
-export REPO=/absolute/path/to/repo
-export CONFIG=/private/config.json
-export DB=/private/patrol-v3.sqlite3
-cd "$REPO"
-python3 -m patrol --config "$CONFIG" --db "$DB" doctor
-python3 -m patrol --config "$CONFIG" --db "$DB" status
+python3 -m patrol --db /private/patrol-v3.sqlite3 init
+python3 -m patrol --db /private/patrol-v3.sqlite3 doctor
+python3 -m patrol --db /private/patrol-v3.sqlite3 status
+python3 -m patrol --db /private/patrol-v3.sqlite3 tick --offline
 ```
 
-确保 **Hook、Muse 的 `stage`、独立 Executor 和 Full Tick 指向同一个 `DB`**，避免把动作写入 A 库却让发送器读取 B 库。默认数据库在 `~/.crewquay/patrol-v3.sqlite3`，不代表它是生产库。运行文件、API Key 和数据库不要放进 Git 仓库。
-
-配置参考 [config.example.json](config.example.json)：
-
-- `database`：统一的 SQLite 路径；CLI `--db` 可显式覆盖。
-- `credential_file`（Linux）或 `credential_target`（Windows）：仅在授权联网时惰性读取本机凭据；不得打印、提交或共享。Linux 凭据文件需要本人所有、0600、非符号链接。
-- `allow_writes`：默认 `false`；只有业务已明确批准时，**执行器使用的配置**才可启用 `true`。Light Tick 无论配置如何都禁止写。
-- `allowed_chat_ids`：明确允许发送的聊天 ID；不会自动包含 Task4 等任务线程。
-- `ack_chat_map` / `ack_single_enabled`：ACK/read 的额外依赖与门禁，不随消息发送权限自动放开。
-
-初始化新的**隔离**数据库示例（已有生产库请先备份，勿将它作为新库覆盖）：
+使用配置文件：
 
 ```sh
-python3 -m patrol --db /private/new-test.sqlite3 init
-python3 -m patrol --db /private/new-test.sqlite3 tick --offline
+python3 -m patrol --config /private/config.json --db /private/patrol-v3.sqlite3 tick --light
 ```
 
-## 运行路径 A：Hook 只感知和按需唤醒 Muse
+与动作执行有关的配置：
+
+| 字段 | 作用 |
+| --- | --- |
+| `database` | SQLite 数据库位置 |
+| `base_url` | CrewQuay API HTTPS origin |
+| `credential_file` / `credential_target` | 凭据来源，按操作系统选择 |
+| `allow_writes` | 远端写入总开关，默认 `false` |
+| `allowed_chat_ids` | 可写入聊天范围 |
+| `ack_chat_map` / `ack_single_enabled` | 通知 ACK 的额外约束 |
+| `light_max_requests` / `light_tick_budget_seconds` | Light Tick 请求与时间预算 |
+| `wakeup_min_score` | 唤醒意图生成的工作优先级阈值 |
+
+配置加载会拒绝未知字段和无效值。Linux 凭据文件采用限制访问的本地文件；具体校验规则以配置与 transport 模块为准。
+
+## CLI 用法
+
+### 巡检与工作读取
 
 ```sh
-python3 -m patrol --config "$CONFIG" --db "$DB" tick --light
-python3 -m patrol --config "$CONFIG" --db "$DB" wakeup-export --limit 50
+# 有界 Light Tick：本地工作 + 浅层采集 + 唤醒意图
+python3 -m patrol --config /private/config.json tick --light
+
+# 完整 Tick：资源同步、历史处理与恢复
+python3 -m patrol --config /private/config.json tick
+
+# 导出待办与唤醒意图
+python3 -m patrol --config /private/config.json export-pending --limit 50
+python3 -m patrol --config /private/config.json wakeup-export --limit 50
+
+# 历史消息补评分和 Muse 待评分列表
+python3 -m patrol --config /private/config.json score-backfill --limit 1000
+python3 -m patrol --config /private/config.json score-export --limit 50
 ```
 
-建议由**已经核实真实调用节奏的宿主 Hook** 调用 Light Tick。其单次默认上限为 8 次请求、20 秒、每源最多 1 页、最多 4 个候选聊天（均可在配置中设置上限）；会保留 429/5xx 的退避、游标与首次入库资格。活跃聊天建议扫描间隔 60 秒、冷却 180 秒、空闲 600 秒，因此**Hook 每分钟触发不代表每条消息都保证一分钟发现**。
+`score-export --limit` 的允许范围为 `1..100`。基础分来自持久化的消息元数据；语义评分由外部 Muse 判断后显式提交，不会由 CLI 自动调用模型。
 
-Hook 在 Light Tick **完成之后**取当前时间，再读取到期的 `wakeup_requests`：有 `pending/retry_wait` 且 `next_attempt_at <= now` 时可 `wake`，无待处理则 `silent`。只有真实宿主接收证据才能记录唤醒 `accepted`，它也不等于 Muse 已完成工作。
+Light Tick 会持久化实际接收到的事件、消息资格及游标；默认预算包含 `light_max_requests=8`、`light_tick_budget_seconds=20`、`light_max_pages_per_source=1`、`max_light_chats=4`。实际消息发现频率还受活动窗口、分页、网络退避与采集覆盖状态影响。
 
-可参照 [Phase 3 Hook 示例](tools/crewquay_phase3_hook.sh)。它还包含独立的 Chat Outbox 补偿，但**仅是模板、不会自动安装**。宿主必须验证 `HATCH_HOOK_RUNTIME`、`CREWQUAY_REPO`、`CREWQUAY_DB`、`CREWQUAY_CONFIG`、文件锁与超时预算。宿主若不允许 Hook 使用凭据，需将带凭据的 Python 巡检或消费者放在获得批准的独立调度环境，Hook 只做本地唤醒检查。
+### 动作入队：区分生产者与平台身份
 
-## 运行路径 B：Muse 决策，生成回复后直接入队并触发执行
+从 Phase 3 起，`stage` 的 `--actor` 是**经核验的 CrewQuay 平台 Agent 身份**，不是 Muse/Hook worker 名称。
 
-先使用真实授权和消息上下文生成唯一逻辑动作，准备私有 `reply.json`：
+- 不提供 `--actor` 时，`stage` 从已绑定的 `meta.actor` 获取平台身份；未绑定则报错。
+- `--producer-id` 记录生成动作的 worker 来源，仅用于审计。
+- 显式 `--actor` 与绑定平台身份不一致时，直接拒绝入队。
+- 同一 `logical-key` 对应的动作、目标及 payload 不可变；重复提交相同请求复用原 Outbox ID。
+
+回复正文文件（示例 `/private/reply.json`）：
 
 ```json
-{"content":"这里放经过 Muse 判断并获授权发送的回复正文"}
+{"content":"需要发送的回复正文"}
 ```
 
-**推荐命令（即时投递，不用等待 Full Tick）：**
+仅持久化动作：
 
 ```sh
-python3 -m patrol --config "$CONFIG" --db "$DB" stage send \
+python3 -m patrol --config /private/config.json stage send \
   --logical-key reply:SOURCE_MESSAGE_ID \
-  --producer-id muse-hook-worker \
+  --producer-id muse-worker \
+  --target AUTHORIZED_CHAT_ID \
+  --payload-file /private/reply.json
+```
+
+持久化后立即启动一次独立消费：
+
+```sh
+python3 -m patrol --config /private/config.json stage send \
+  --logical-key reply:SOURCE_MESSAGE_ID \
+  --producer-id muse-worker \
   --target AUTHORIZED_CHAT_ID \
   --payload-file /private/reply.json \
   --dispatch-now
 ```
 
-行为精确定义：
+`--dispatch-now` 的实现顺序是 **SQLite 提交 → 释放 CLI 锁 → 独立 Python Executor 子进程 → 校验/发送/读回 → 查询数据库状态**。只有 Outbox 已持久化为 `confirmed`，CLI 才报告 `sent=true`；动作创建成功本身不代表已送达。
 
-1. `stage` 根据数据库已绑定的平台 `meta.actor` 固定 `actor`，记录 Muse `producer_id`，校验动作、正文和逻辑键；**目标聊天的写入授权由后续 Executor 校验**。入队后获得 `outbox_id`。
-2. 写入原有 SQLite `outbox` 和可选 `outbox_producers` 审计记录，保存不可变 payload SHA 和幂等键。重复暂存同一个逻辑动作会复用原 ID；**相同逻辑键内容变更会被拒绝**。
-3. 显式 `--dispatch-now` 会在暂存事务与 CLI 文件锁释放后启动**独立 Python 子进程**，等价于针对该 ID 进行一次有界 `outbox-drain --once`。
-4. Executor **重新验证 CrewQuay 实际身份和目标范围**，进行 POST，按远端消息 ID、发送者与正文读回，写入 `confirmed` 及证据。
-5. 父进程再次查 SQLite；**只有数据库中的动作已 `confirmed` 才输出 `sent=true`**。子进程失败、超时或读回未完成不能声称送达。CLI `stage` 成功退出也仅代表动作已持久化。
-
-`--dispatch-now` 必须**显式**添加；不添加时只入队、不启动发送器。Muse 不需要直接调用聊天 POST，但它必须先具备合法的业务操作授权。**不要因为没有收到即时 `confirmed` 就换一个 `logical-key` 重发。**
-
-### Muse / Hook / Executor 的宿主指令应同步更新
-
-**Muse worker 的任务指令**应明确：从 `export-pending` / `wakeup-export` 获取真实待办，使用现有的合法 `work-claim` 和证据机制；获得业务授权后生成回复 JSON。**不要直接调用聊天 POST，不要把 worker 自身名称传入 `--actor`，不要自行改写旧 Outbox**。对于允许立即发送的私聊，固定业务 `logical-key`，执行 `stage send --producer-id ... --dispatch-now`，根据最终 SQLite `confirmed` 及远端读回再向 Owner 声称送达。未确认则只报告“已入队/待对账”，不换逻辑键二次暂存。
-
-**Hook 的任务指令**应明确：纯 Python `tick --light` 和有界 `outbox-drain --once --lane chat` 后，只有**到期唤醒意图**才调用宿主的 `wake`；没有就 `silent`。遇到 `partial/degraded` 不要上报为全量完成，也不要让 Hook 凭工作评分自行发送消息。
-
-**Executor 的任务指令**应明确：正常发送路径已经是 Python 命令 `outbox-drain`，并不需要 Muse 模型理解或改写回复；执行层只执行已登记、已授权、已到期的动作，保留原幂等键并进行读回验证。`Full Tick` / 五分钟 Cron 如继续存在，只作为独立同步与故障恢复职责，不能成为每条新回复的强制等待门槛。
-
-### 独立消费者：手动指定动作或消费逻辑队列
+### 独立消费 Outbox
 
 ```sh
-# 只消费一条既有动作：推荐排查即时投递或针对性重试
-python3 -m patrol --config "$CONFIG" --db "$DB" \
-  outbox-drain --once --id OUTBOX_ID --limit 1
+# 消费指定动作
+python3 -m patrol --config /private/config.json outbox-drain \
+  --once --id OUTBOX_ID --limit 1
 
-# Chat Queue：发送消息（可由 Hook 每轮补偿）
-python3 -m patrol --config "$CONFIG" --db "$DB" \
-  outbox-drain --once --lane chat --limit 3
+# Chat lane：send
+python3 -m patrol --config /private/config.json outbox-drain \
+  --once --lane chat --limit 3
 
-# Notifications Queue：ACK/read 单独分流，仍受各自额外安全门禁
-python3 -m patrol --config "$CONFIG" --db "$DB" \
-  outbox-drain --once --lane notifications --limit 3
+# Notifications lane：ack / read
+python3 -m patrol --config /private/config.json outbox-drain \
+  --once --lane notifications --limit 3
 ```
 
-这是**一次性消费命令**，不是永久后台服务。当前多队列是同一 SQLite Outbox 的**逻辑 lane**：`chat` 处理 `send`，`notifications` 处理 `ack/read`，`any` 为默认。无授权的旧 `prepared` 会被有界延后检查，不再长期占据前几个投递名额；但它仍是待人工对账的旧记录，不得直接把 actor 改成合法值。
+`outbox-drain` 是**有界、单次执行**的命令，可通过 `--lane any|chat|notifications` 限定逻辑队列。它不会运行 Full Tick，也不会启动大模型。目前暂未提供独立任务线程发送适配器。
 
-**当前不支持任务线程 POST**；Task4 等任务线程回复必须通过另行获授权且已实现的接口/适配器，不能伪造聊天 ID 或借 Chat Queue 绕过权限。
-
-## 运行路径 C：Full Tick 只做完整同步和恢复兜底
+### 工作、承诺与恢复接口
 
 ```sh
-python3 -m patrol --config "$CONFIG" --db "$DB" tick
-# 可选 WebSocket；如未部署可信 websocket-client，REST 仍可工作
-python3 -m patrol --config "$CONFIG" --db "$DB" tick --ws
+python3 -m patrol --config /private/config.json work-claim WORK_ID \
+  --owner WORKER_ID --authorization-evidence /private/authorization.json
+python3 -m patrol --config /private/config.json work-renew WORK_ID \
+  --owner WORKER_ID --lease-version VERSION --evidence /private/progress.json
+python3 -m patrol --config /private/config.json work-finish WORK_ID \
+  --owner WORKER_ID --lease-version VERSION --evidence /private/result.json
+
+python3 -m patrol --config /private/config.json backup /private/backup.sqlite3
+python3 -m patrol --config /private/config.json status
 ```
 
-Full Tick 仍会处理历史消息/项目/任务同步、事件流重同步、承诺 Watchdog、超时租约、Outbox 的对账和旧业务积压，**也仍可能消费符合授权的 Outbox**。因此生产上线期间不能将 Full Tick 和独立消费者理解成两套不同的发送者：两者共用 SQLite、幂等、单次文件锁和同一执行权限边界。
+还提供 `promise-add`、`promise-progress`、`promise-complete`、`extension-request`、`extension-approve`、`wakeup-claim`、`wakeup-ack`、`wakeup-reconcile`、`resolve` 等命令；参数以 `python3 -m patrol COMMAND --help` 为准。所有本地租约与业务平台授权是不同概念。
 
-**新回复不依赖五分钟 Cron 等待发送；但 Full Tick 的同步与恢复职责没有凭空消失。** 只有验证现有 Hook 或其他获批准的外部调度可以补足这些职责后，才可停用旧五分钟 Executor Cron；原独立十分钟巡检不属于本架构改造范围，不要擅自修改。
+## 持久化与结果状态
 
-## 工作队列、评分和承诺
+| 状态或记录 | 含义 |
+| --- | --- |
+| `work_items` | 本地待执行工作；领取、租约和完成状态独立于远端 API |
+| `wakeup_requests` | 对宿主的唤醒意图；`accepted` 只表示唤醒已被接受 |
+| `outbox.prepared` | 动作已保存，尚未确认投递 |
+| `outbox.sending` | 已获得发送租约，可能发生远端副作用 |
+| `outbox.confirmed` | 已取得远端读回确认（消息 ID / 正文 / 发送者证据） |
+| `outbox.unknown` | 结果不确定，按远端身份与证据对账，不盲目重复 POST |
+| `outbox.permanent_failed` | 已确定无法按当前动作直接完成 |
 
-**工作与动作不能混淆**：
+Outbox 保留逻辑键和 `idem_key`，发送方使用租约/版本防止旧执行者覆盖新结果；不可确认的远端结果进入独立对账流程。由于 `send` 需要准确远端消息 ID，不能仅凭消息正文一致推断已发送成功。ACK/read 的精确读回限制保留在组件合同中。
 
-- `work_items`：Patrol 识别“需要做什么”，包括 `inspect_event`、`human_action` 等；优先级决定谁先交给 Muse。
-- `wakeup_requests`：到期工作需要向宿主通知 Muse，带去重、租约与接收证据；`accepted` ≠ 已执行。
-- `outbox`：Muse 已决定并获授权执行的具体动作，带目标、actor、幂等键与读回证据；`confirmed` 才是实际结果。
+巡检报告中的 `ok/partial/degraded/deferred` 主要描述本轮处理覆盖及错误；不能替代 Outbox 的远端送达状态。数据库还保存 `received/handled` 游标、首次入库消息资格、评分历史、关注窗口、承诺和告警。过期 `leased` 唤醒会根据底层业务状态对账成 `obsolete` 或 `unknown`，不会自动重复唤醒。
 
-已入库消息在首次持久化时保存 `message_receipts` 与元数据基础分；重复抓取不刷新新鲜度。Muse 可自行以事实和证据更新语义分（0–100），分数不意味着权限：
+## Hook 参考实现
 
-```sh
-python3 -m patrol --config "$CONFIG" --db "$DB" score-backfill --limit 1000
-python3 -m patrol --config "$CONFIG" --db "$DB" score-export --limit 50
-python3 -m patrol --config "$CONFIG" --db "$DB" score-message EVENT_ID \
-  --actor VERIFIED_AGENT_ID --score 90 \
-  --reason "实际授权任务临近截止" --evidence /private/score-evidence.json
-python3 -m patrol --config "$CONFIG" --db "$DB" export-pending --limit 50
-```
+[tools/crewquay_phase3_hook.sh](tools/crewquay_phase3_hook.sh) 提供一个示例组合：
 
-注意 `score-export --limit` 的有效范围为 **1..100**（`score-backfill` 不是同一个限制）；命令失败不是“成功查到 0 条”，外部统计必须先检查退出码和 JSON 状态。
+1. 执行有界 `tick --light`；
+2. 执行一次 `outbox-drain --once --lane chat`；
+3. 查询 SQLite 中到期 `wakeup_requests`；
+4. 返回宿主的 `wake` 或 `silent`。
 
-Muse 必须根据真实范围和合法批准领取、推进、完成工作：
+此文件是参考脚本；仓库没有内置 Muse 宿主或 Hook 调度安装器。Hooks 与 Executor 可共享同一 SQLite 状态及现有 CLI 文件锁。
 
-```sh
-python3 -m patrol --config "$CONFIG" --db "$DB" work-claim WORK_ID \
-  --owner actual-worker --authorization-evidence /private/authorization.json
-python3 -m patrol --config "$CONFIG" --db "$DB" work-finish WORK_ID \
-  --owner actual-worker --lease-version LEASE_VERSION \
-  --evidence /private/result.json
-```
-
-这是本地工作租约，不等于 CrewQuay 服务端授予项目角色。长期工作在租约到期前应通过 `work-renew` 提交可核验的实际进展，不能虚报完成。
-
-承诺 Watchdog 负责发现即将到期、超时和缺少进展的承诺，不自动写回复。支持 `promise-add`、`promise-progress`、`promise-complete`、`extension-request` / `extension-approve`；延期必须由有效批准主体提供证据，不能由承诺人自己批准。
-
-## 执行状态、对账与排障
-
-| 状态 | 含义 | 处理原则 |
-| --- | --- | --- |
-| `prepared` | 动作已经入库，但**尚未确认发送** | 核对身份、目标、到期时间与即时子进程结果；不另起新业务逻辑键 |
-| `sending` | 已领取发送租约，可能存在远程副作用 | 不并行重复 POST；过期后进入对账 |
-| `confirmed` | 确认有远端读回证据 | 可汇报远端 `remote_id` 和 SHA |
-| `unknown` | 可能远端已经成功，但没有完成核验 | **只按原 ID/证据对账，绝不换键盲重发** |
-| `permanent_failed` | 已确认的不可直接重试失败 | 检查实际 HTTP/权限条件，由获授权方决定后续动作 |
-
-`tick` 的 `partial`、`degraded` 或 `event_stream:backoff` 说明采集覆盖不完整；**Outbox `confirmed` 与采集状态是不同维度**，不得相互冒充。
-
-只核查**非敏感摘要**的 SQLite 示例：
-
-```sh
-sqlite3 "file:$DB?mode=ro" \
-  "SELECT id,logical_key,actor,action,target,status,remote_id,attempts
-     FROM outbox ORDER BY created_at DESC LIMIT 10;"
-sqlite3 "file:$DB?mode=ro" \
-  "SELECT status,count(*) FROM wakeup_requests GROUP BY status;"
-```
-
-不要将生产消息正文、API Key、生产 SQLite 文件、完整业务日志贴进公开 Issue / PR。生产迁移中旧错误 actor 的 `prepared` 必须与已有已确认远端回复对账，不能为了通过身份门禁简单改写 actor 或重新创建同一条消息。
-
-## 生产更新：给 Quill / 宿主操作者的执行顺序
-
-此仓库只提供源代码，**以下是需要宿主实际执行并核对证据的操作，不是已经自动完成**。
-
-1. **先备份**：用现有 `python -m patrol ... backup DESTINATION` 或 SQLite Backup API 做一致性备份；另备份当前 Hook 文件、生产配置与调度定义，不能直接复制活跃数据库冒充一致性备份。
-2. **更新生产 checkout**：核实准备切换的 `main` 提交、私有配置、真实 `DB` 路径、`meta.actor`、`allowed_chat_ids` 与已有 `allow_writes`。仓库更新不意味着生产 Hook 同步更新。
-3. **更新 Muse 指令**：把旧 `stage --actor HOOK_WORKER_NAME` 改成 `stage --producer-id WORKER_NAME --dispatch-now`（省略 `--actor`）；用真实授权且未回复的新业务动作逻辑键。
-4. **更新 Hook**：参照 `tools/crewquay_phase3_hook.sh`，将 Light Tick + Chat Outbox 单次补偿 + 到期 `wake/silent` 放到已获批准的宿主 Hook。不要无验证覆盖正在运行的脚本；检查超时和凭据可用性。
-5. **真实链路验收**：记录消息到达、Light Tick、Muse 开始、stage、Executor POST、远端读回与 SQLite `confirmed` 时间；同一业务键重复触发不能产生第二条 POST。
-6. **故障验收**：即时子进程失败/锁忙/超时时，Outbox 留存原动作；Hook 能补偿或只做 `unknown` 对账，不重复发送；检查旧错误 `prepared` 不被错发。
-7. **再调整旧 Cron**：验证 Full Tick/历史覆盖和租约恢复的替代路径，之后才决定停用原五分钟 Muse Executor Cron；保留独立旧十分钟巡检的既有约束。回滚代码或 Hook 不应回滚已确认的远端副作用，也不能删除 Outbox 记录。
-
-## 架构契约与参考
-
-- [巡检客户端责任根](patrol/README.md)；[Runtime](patrol/components/runtime/README.md)、[Executor](patrol/components/executor/README.md)、[Outbox](patrol/components/outbox/README.md) 按 RSMA 组件公开入口协作；不跨边界深导入。
-- [测试说明](docs/TESTING.md)、[迁移与回滚](docs/MIGRATION.md)。
-- 可选 WebSocket 见 `requirements-ws.txt`。SQLite 默认 `DELETE + synchronous=FULL`；WAL 需要程序支持的已修复 SQLite 版本，详见 `Config` 和 `doctor`。
-- 代码本身不托管 Muse 模型、不具备 CrewQuay 平台服务端管理权限，也不安装/停止 Cron 或 Hook。旧版 `poll.py`、`ws_watch.py`、`watchdog.py` 是兼容入口，**不是 Phase 3 日常即时回复的推荐执行路径**。
-
-验证（临时数据库 + Fake Transport，不连接真实 CrewQuay 或读取密钥）：
+## 测试与文档
 
 ```sh
 python3 -m unittest discover -s tests -v
@@ -251,4 +223,12 @@ python3 tools/validate_architecture.py
 python3 tools/run_checks.py --output validation
 ```
 
-本仓库公开：不要提交任何密钥、私有配置、生产日志、数据库、WAL/SHM 或客户消息。外部消息内容属于不可信输入；业务内容、模型评分和本地租约均不得自动提升远程权限。
+测试使用临时 SQLite 和 Fake Transport，不包含实际生产凭据与远端写操作。项目模块边界遵循仓库 [AGENTS.md](AGENTS.md) 与各组件 README。更多细节见：
+
+- [验证说明](docs/TESTING.md)
+- [迁移与回滚 API](docs/MIGRATION.md)
+- [巡检责任根](patrol/README.md)
+- [Executor 组件契约](patrol/components/executor/README.md)
+- [Outbox 组件契约](patrol/components/outbox/README.md)
+
+仓库不包含有效的 API 密钥或生产业务数据；外部 API 返回的文本视为不可信输入，不能自动提升授权。
