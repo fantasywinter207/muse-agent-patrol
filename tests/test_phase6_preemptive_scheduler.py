@@ -133,6 +133,42 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         self.assertEqual(safe["activity"]["status"],"running")
         self.assertEqual(safe["activity"]["lease_version"],first["lease_version"])
 
+    def test_equal_priority_activities_rotate_after_slice(self):
+        a=self.add("social-a",score=52,weight=50)
+        b=self.add("social-b",score=52,weight=50)
+        first=self.scheduler.dispatch("worker-a",1000)["activity"]
+        self.assertIn(first["id"],(a,b))
+        # Competing equal-value work cannot force an immediate context switch.
+        early=self.scheduler.dispatch("worker-b",1001)
+        self.assertFalse(early["granted"])
+        self.assertEqual(early["advice"],"continue")
+        end=first["slice_until"]
+        gate=self.scheduler.dispatch("worker-b",end)
+        self.assertFalse(gate["granted"])
+        self.assertEqual(gate["advice"],"checkpoint_at_safe_point")
+        result=self.scheduler.checkpoint(first["id"],"worker-a",first["lease_version"],
+                                         end+0.01,{"safe_point":"slice boundary"})
+        self.assertTrue(result["suspended"])
+        second=self.scheduler.dispatch("worker-b",end+0.02)["activity"]
+        self.assertNotEqual(second["id"],first["id"])
+
+    def test_external_work_completion_fences_ongoing_activity(self):
+        work=Queue(self.db).enqueue("human:finished-elsewhere","human_action",
+                                    {"reason":"work"},1000,priority=75)
+        self.scheduler.sync_work(1000)
+        active=self.scheduler.dispatch("owner",1001)["activity"]
+        with self.db.transaction() as c:
+            c.execute("UPDATE work_items SET status='done' WHERE id=?",(work,))
+        self.scheduler.sync_work(1002)
+        state=self.db.read("SELECT status,lease_version FROM schedule_activities WHERE id=?",
+                           (active["id"],))[0]
+        self.assertEqual(state["status"],"completed")
+        self.assertGreater(state["lease_version"],active["lease_version"])
+        with self.assertRaises(StaleLease):
+            Outbox(self.db).stage("late","muse","send","chat",{"content":"stale"},1002,
+                                 schedule_context={"id":active["id"],
+                                   "owner":"owner","generation":active["lease_version"]})
+
     def test_idempotent_register_and_immutable_keys(self):
         ident=self.add("key",score=42)
         self.assertEqual(self.add("key",score=42),ident)
