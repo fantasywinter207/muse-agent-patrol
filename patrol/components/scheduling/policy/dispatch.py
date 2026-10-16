@@ -91,23 +91,36 @@ class Scheduler:
         added=0
         with self.db.transaction() as c:
             rows=c.execute("""SELECT w.id,w.priority,w.created_at,w.start_by,w.due_at,
-                         p.due_at AS promise_due
+                         p.due_at AS promise_due, e.source AS event_source,
+                         COALESCE(ms.muse_score,ms.base_score) AS message_score
                          FROM work_items w LEFT JOIN promises p
                            ON p.work_item_id=w.id AND p.status!='done'
+                         LEFT JOIN events e ON e.id=w.event_id
+                         LEFT JOIN message_scores ms ON ms.event_id=w.event_id
                          WHERE w.type='human_action' AND w.status IN
                            ('pending','retry_wait','blocked','needs_approval')
                          ORDER BY w.created_at LIMIT ?""",(limit,)).fetchall()
             for row in rows:
                 key="work:"+row["id"]
-                if c.execute("SELECT 1 FROM schedule_activities WHERE logical_key=?",(key,)).fetchone():
+                score=(row["message_score"] if row["event_source"]=="messages"
+                       and row["message_score"] is not None else row["priority"])
+                score=min(100,max(0,score))
+                deadline=(row["promise_due"] if row["promise_due"] is not None else
+                          row["due_at"] if row["due_at"] is not None else
+                          row["start_by"])
+                existing=c.execute("SELECT id,status FROM schedule_activities WHERE logical_key=?",
+                                   (key,)).fetchone()
+                if existing:
+                    if existing["status"] in ("ready","suspended","running"):
+                        c.execute("""UPDATE schedule_activities
+                            SET base_priority=?,deadline=?,last_updated=?
+                            WHERE id=?""",(score,deadline,now,existing["id"]))
                     continue
-                deadline=row["promise_due"] or row["due_at"] or row["start_by"]
                 c.execute("""INSERT INTO schedule_activities
                   (id,logical_key,kind,work_id,status,base_priority,weight,
                    deadline,switch_cost,created_at,ready_since,last_updated)
                   VALUES(?,?, 'work',?,'ready',?,?,?,?,?,?,?)""",
-                  (new_id(),key,row["id"],min(100,max(0,row["priority"])),
-                   50,deadline,4,now,now,now))
+                  (new_id(),key,row["id"],score,50,deadline,4,now,now,now))
                 added+=1
             # External workers retain their own Queue fencing. A locally
             # completed work item invalidates an unleased scheduled copy,
