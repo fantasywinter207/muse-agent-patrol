@@ -56,3 +56,7 @@ A live test is still necessary for actual throughput and host permissions: (1) k
 ## Phase 5 Light Tick event-only collection
 
 `tests/test_phase5_light_event_only.py` uses temporary SQLite + a fake authenticated event feed to cover chat/Room/project/Task discussion message normalization, first-observation receipts, baseline scoring, generic task-event wakeup, duplicate replay, typed scopes, redacted/old events, multi-page target pinning, stream mismatch, malformed context/cursors and 410 resync without data loss. `tests/test_phase2_light_wakeup.py` and `tests/test_phase2_invalid_cursor.py` cover the migrated Light Tick entrypoint; Full Tick historical restoration retains its separate tests. No live API or credentials are used. The server adds `agent-event-context.test.ts` for actual recipient visibility and authorized message context.
+
+## Phase 6.1 preemptive activity scheduling
+
+`tests/test_phase6_preemptive_scheduler.py` covers EDF urgency, waited activity aging, weighted virtual-runtime accounting, finite quantum rotation, hysteresis, safe-point fencing, resumed checkpoint generation, expired lease recovery, no unstaged remote actions, optional atomic Outbox stage guards and deduped `human_action` import during Light Tick. Tests create temporary SQLite databases; they never invoke a model or live API. Earlier Phase 2–5 tests must continue passing on Linux and Windows.
