@@ -228,6 +228,16 @@ class PreemptiveSchedulerTests(unittest.TestCase):
                        (ident,))[0]
         self.assertEqual(b["base_priority"],92)
 
+    def test_bounded_work_import_advances_past_old_already_registered_rows(self):
+        for i in range(5):
+            Queue(self.db).enqueue("human:backlog-"+str(i),"human_action",
+                                   {"index":i},1000+i,priority=70)
+        self.assertEqual(self.scheduler.sync_work(1100,limit=2),2)
+        self.assertEqual(self.scheduler.sync_work(1101,limit=2),2)
+        self.assertEqual(self.scheduler.sync_work(1102,limit=2),1)
+        self.assertEqual(self.scheduler.sync_work(1103,limit=2),0)
+        self.assertEqual(self.db.read("SELECT count(*) AS n FROM schedule_activities")[0]["n"],5)
+
     def test_tick_imports_work_but_does_not_invoke_external_model(self):
         Queue(self.db).enqueue("human:auto","human_action",
                               {"reason":"owner work"},1000,priority=82)
