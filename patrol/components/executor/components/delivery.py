@@ -66,6 +66,10 @@ class ActionSender:
         return self.client.request("POST",path,row["payload"],row["idem_key"])
 
     def verify(self,row,response):
+        # A read-only unknown-result reconciliation must still respect the
+        # authorized chat scope, even though it never sends a POST.
+        if row["action"]=="send" and row["target"] not in self.config.allowed_chat_ids:
+            return None
         # Unknown operations without a stable remote id cannot safely be guessed from matching text.
         if response is None and row.get("remote_id"):
             response={"messageId":row["remote_id"]}
