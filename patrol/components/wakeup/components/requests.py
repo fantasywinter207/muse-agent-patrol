@@ -128,6 +128,49 @@ class Wakeups:
                     "source_type":x["source_type"],"source_id":x["source_id"],
                     "host_called":False}
 
+    def claim_next(self, owner, now, limit=100):
+        """Atomically reserve the highest-priority due host signal.
+
+        Unlike export -> claim, selection and lease acquisition happen inside
+        one SQLite transaction, so overlapping Hook turns cannot duplicate a
+        dispatch. This does not call the host or assert delivery.
+        """
+        if (not isinstance(owner,str) or not 1<=len(owner)<=128
+                or type(limit) is not int or not 1<=limit<=200):
+            raise ValueError("bounded host owner and selection limit required")
+        with self.db.transaction() as c:
+            rows=c.execute("""SELECT * FROM wakeup_requests
+                WHERE status IN ('pending','retry_wait') AND next_attempt_at<=?
+                ORDER BY priority DESC,created_at,id LIMIT ?""",(now,limit)).fetchall()
+            for row in rows:
+                if not self._source_alive(c,row):
+                    c.execute("""UPDATE wakeup_requests SET status='obsolete',
+                        lease_owner=NULL,lease_until=NULL
+                        WHERE id=? AND status IN ('pending','retry_wait')""",
+                        (row["id"],))
+                    continue
+                # A future retry is not executable even if an earlier wakeup
+                # intent remained due. Preserve it for its actual retry time.
+                if row["source_type"]=="work":
+                    source=c.execute("SELECT status,next_action_at FROM work_items WHERE id=?",
+                                     (row["source_id"],)).fetchone()
+                    if source and source["status"]=="retry_wait" and source["next_action_at"]>now:
+                        continue
+                n=c.execute("""UPDATE wakeup_requests SET status='leased',
+                    lease_owner=?,lease_until=?,lease_version=lease_version+1,
+                    attempts=attempts+1
+                    WHERE id=? AND status IN ('pending','retry_wait')
+                    AND next_attempt_at<=?""",
+                    (owner,now+self.lease_seconds,row["id"],now)).rowcount
+                if n:
+                    leased=c.execute("SELECT * FROM wakeup_requests WHERE id=?",
+                                     (row["id"],)).fetchone()
+                    return {"id":leased["id"],"source_type":leased["source_type"],
+                            "source_id":leased["source_id"],"lease_owner":owner,
+                            "lease_version":leased["lease_version"],
+                            "lease_until":leased["lease_until"],"host_called":False}
+        return None
+
     def acknowledge(self, ident, owner, version, now, result, evidence):
         if result not in ("accepted","confirmed_failed","unknown"):
             raise ValueError("invalid dispatch result")
