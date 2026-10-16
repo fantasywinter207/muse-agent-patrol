@@ -205,6 +205,29 @@ class PreemptiveSchedulerTests(unittest.TestCase):
             self.scheduler.cancel(active,1003,"cannot kill remote work")
         self.assertEqual(claimed["status"],"running")
 
+    def test_reconciliation_uses_latest_muse_score_not_old_work_priority(self):
+        with self.db.transaction() as c:
+            c.execute("""INSERT INTO events(source,scope,stream,external_key,
+                         payload,observed_at) VALUES
+                         ('messages','owner','','msg1','{}',1000)""")
+            event_id=c.execute("SELECT last_insert_rowid()").fetchone()[0]
+            c.execute("""INSERT INTO message_scores(event_id,base_score,baseline_at)
+                         VALUES(?,?,?)""",(event_id,25,1000))
+        ident=Queue(self.db).enqueue("human:score-updated","human_action",
+                                     {"event_id":event_id},1000,
+                                     priority=25,event_id=event_id)
+        self.assertEqual(self.scheduler.sync_work(1001),1)
+        a=self.db.read("SELECT base_priority FROM schedule_activities WHERE work_id=?",
+                       (ident,))[0]
+        self.assertEqual(a["base_priority"],25)
+        with self.db.transaction() as c:
+            c.execute("UPDATE message_scores SET muse_score=92 WHERE event_id=?",
+                      (event_id,))
+        self.assertEqual(self.scheduler.sync_work(1002),0)
+        b=self.db.read("SELECT base_priority FROM schedule_activities WHERE work_id=?",
+                       (ident,))[0]
+        self.assertEqual(b["base_priority"],92)
+
     def test_tick_imports_work_but_does_not_invoke_external_model(self):
         Queue(self.db).enqueue("human:auto","human_action",
                               {"reason":"owner work"},1000,priority=82)
