@@ -162,6 +162,34 @@ python -m patrol --config /private/config.json resolve OUTBOX_ID --proven-absent
 
 resolve不会发请求；再次发送仍使用原幂等键。服务端幂等保留期和权限变化必须由操作者核对，不能无限期承诺外部恰好一次。
 
+### Phase 3：Muse 决策与 Python 执行层分离
+
+`main` 代码保留唯一 SQLite 动作 Outbox，新增独立 `executor` 公开模块和一次性消费命令。已启用的 Host Hook / Cron 是否更新仍由实际宿主操作者决定，本仓库不会部署后台进程。
+
+Muse worker 不再需要冒充平台执行者：`--producer-id` 记录 Muse/Hook worker 审计身份，平台 actor 从 SQLite 中先前经过 REST 验证的 `meta.actor` 读取。带错 `--actor` 会提前失败，不会默默留下一条永久不能发送的 `prepared`。示例：
+
+```sh
+# 经过单独授权的 CrewQuay 聊天回复正文；逻辑键必须来自真实、唯一的业务动作。
+python3 -m patrol --config /private/config.json stage send \
+  --logical-key reply-to-message-123 \
+  --producer-id muse-hook-worker \
+  --target allowed-chat-id --payload-file /private/reply.json \
+  --dispatch-now
+
+# 即使第一次即时启动失败，回复仍保存在原 Outbox 中；
+# Host Hook 可以每分钟运行一次凭据授权的轻量消费者作补偿。
+python3 -m patrol --config /private/config.json outbox-drain --once --lane chat --limit 3
+
+# 亦可只处理指定的、已经存在的 immutable Outbox ID。
+python3 -m patrol --config /private/config.json outbox-drain --once --id OUTBOX_ID --limit 1
+```
+
+`stage` 默认为**只入队**；只有显式指定 `--dispatch-now` 才在事务及 CLI 锁释放后启动独立 Python Executor 子进程。独立消费者在 POST 前会验证真实 CrewQuay 身份和允许的目标聊天；发送后仍必须读回具体消息 ID、发送者、正文并将 Outbox 持久化为 `confirmed`。如果外部执行失败，`stage` 仍返回 `prepared`，不能误认作已送达。动作不确定时仍进入 `unknown`，不换幂等键盲重发。
+
+动作逻辑队列：`chat` 只消费 `send`，`notifications` 只消费现有 ACK/read，`any` 为默认。暂不支持 Task 线程回复，不能通过伪造聊天 ID 绕过授权。旧版 Full Tick 仍可使用同一 Executor 回调，不另外复制发送实现。
+
+[Phase 3 可选 Hook 参考脚本](tools/crewquay_phase3_hook.sh) 只需已有 Hook 调度，不安装新 Cron。部署前需由宿主确认 Hook 执行时间预算、是否允许直接使用现有受权凭据、数据与配置路径以及执行权限。原五分钟 Muse Cron 和独立旧巡检 **不由代码更改或停用**；先用真实生产数据验证快速 stage→remote confirmed，以及 Hook 补偿后，再切换对应调度。Full Tick 的历史追赶、任务/项目同步仍需可靠的恢复调用，不能因为有了消息队列而直接删除所有 Cron。
+
 ## 迁移、备份和回滚
 
 详见 [迁移与回滚说明](docs/MIGRATION.md)。不自动读取或改写旧状态；迁移要求显式确认旧写入端已停止。
