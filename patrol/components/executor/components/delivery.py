@@ -31,6 +31,25 @@ class ActionSender:
             return False,"explicit write authorization and current matching actor required"
         if row["action"] in ("send","read") and row["target"] not in self.config.allowed_chat_ids:
             return False,"chat outside explicit authorized scope"
+        if row["action"] in ("project_message","task_thread_reply","room_message"):
+            # Project writes require an independent explicit allowlist. Read
+            # scopes (project_ids) MUST NOT implicitly grant write privileges.
+            if not self.config.allowed_project_action_ids:
+                return False,"no explicitly authorized project action scope"
+            if row["action"]=="project_message":
+                project_id=row["target"]
+            else:
+                resource=("tasks" if row["action"]=="task_thread_reply" else "rooms")
+                try:
+                    scope=self.client.request("GET","/api/v1/"+resource+"/"+
+                                              quote(row["target"],safe=""))
+                except Exception:
+                    return False,"resource authorization lookup unavailable"
+                if scope.status!=200 or not isinstance(scope.body,dict):
+                    return False,"resource is not currently readable"
+                project_id=scope.body.get("projectId")
+            if project_id not in self.config.allowed_project_action_ids:
+                return False,"project not in authorized action scope"
         if row["action"]=="read":
             state=self.sync.state("messages",row["target"])
             if state["covered_at"]<=0 or state["target"] is not None or int(row["payload"]["cursor"])>int(state["handled"]):
@@ -57,6 +76,12 @@ class ActionSender:
     def send(self,row):
         if row["action"]=="ack":
             path="/api/v1/inbox/ack"
+        elif row["action"]=="project_message":
+            path="/api/v1/projects/"+quote(row["target"],safe="")+"/messages"
+        elif row["action"]=="task_thread_reply":
+            path="/api/v1/tasks/"+quote(row["target"],safe="")+"/thread/messages"
+        elif row["action"]=="room_message":
+            path="/api/v1/rooms/"+quote(row["target"],safe="")+"/messages"
         else:
             path="/api/v1/chats/"+quote(row["target"],safe="")+("/messages" if row["action"]=="send" else "/read")
         # Authorization is checked immediately before every network write.
@@ -69,6 +94,46 @@ class ActionSender:
         # A read-only unknown-result reconciliation must still respect the
         # authorized chat scope, even though it never sends a POST.
         if row["action"]=="send" and row["target"] not in self.config.allowed_chat_ids:
+            return None
+        if row["action"] in ("project_message","task_thread_reply","room_message"):
+            # Remote response alone is not proof: verify the exact message
+            # identity and content in the corresponding authorized resource.
+            if response is None and row.get("remote_id"):
+                response={"id":row["remote_id"]}
+            if not isinstance(response,dict):
+                return None
+            message=response.get("message",response)
+            ident=message.get("messageId") or message.get("id")
+            if not ident:
+                return None
+            if row["action"]=="project_message":
+                endpoint="/api/v1/projects/"+quote(row["target"],safe="")+"/messages"
+            elif row["action"]=="task_thread_reply":
+                endpoint="/api/v1/tasks/"+quote(row["target"],safe="")+"/thread"
+            else:
+                endpoint="/api/v1/rooms/"+quote(row["target"],safe="")+"/messages"
+            after=str(row.get("verify_cursor") or "0")
+            for _ in range(self.config.max_pages_per_source):
+                r=self.client.request("GET",endpoint+"?after="+after+"&limit=100")
+                if r.status!=200 or not isinstance(r.body,dict):
+                    return None
+                for item in r.body.get("items",[]):
+                    actual_id=item.get("messageId") or item.get("id")
+                    sender=item.get("actorId") or item.get("senderAgentId")
+                    if (actual_id==ident and sender==row["actor"] and
+                            item.get("content")==row["payload"]["content"]):
+                        return {"id":ident,"source":"REST collaboration readback",
+                                "sha256":hashlib.sha256(canonical(item).encode()).hexdigest()}
+                nxt=str(r.body.get("nextCursor",after))
+                try:
+                    if int(nxt)<int(after):
+                        return None
+                except ValueError:
+                    return None
+                self.outbox.verified_page(row["id"],nxt)
+                if not r.body.get("hasMore") or nxt==after:
+                    break
+                after=nxt
             return None
         # Unknown operations without a stable remote id cannot safely be guessed from matching text.
         if response is None and row.get("remote_id"):
@@ -112,7 +177,7 @@ class ActionSender:
             raise ValueError("limit must be between 1 and 50")
         if action_id is not None and (not isinstance(action_id,str) or not action_id):
             raise ValueError("nonempty Outbox ID required")
-        if lane not in ("any","chat","notifications"):
+        if lane not in ("any","chat","notifications","collaboration"):
             raise ValueError("unsupported action lane")
         now=self.clock()
         report={"mode":"outbox_once","status":"idle","outbox_attempts":[],
@@ -124,7 +189,8 @@ class ActionSender:
         self.outbox.recover(now,self.config.lease_seconds)
         selection=" AND id=?" if action_id is not None else ""
         scope={"any":"","chat":" AND action='send'",
-               "notifications":" AND action IN ('ack','read')"}[lane]
+               "notifications":" AND action IN ('ack','read')",
+               "collaboration":" AND action IN ('project_message','task_thread_reply','room_message')"}[lane]
         params=(now,action_id) if action_id is not None else (now,)
         # Check due work before loading credentials or making an API request.
         due=self.db.read("""SELECT id FROM outbox WHERE
