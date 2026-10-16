@@ -18,6 +18,7 @@ from ...executor.index import ActionSender
 from ...persistence.index import Database, Busy
 from ...promises.index import Promises
 from ...queue.index import Queue, export_pending, MessageScores
+from ...scheduling.index import Scheduler
 from ...transport.index import Client, credential_provider
 from ...wakeup.index import Wakeups
 from ..process.lock import instance_lock
@@ -81,6 +82,9 @@ def parser():
                    help="after durable staging, run a separate bounded Executor process")
     a.add_argument("--target",default="")
     a.add_argument("--payload-file",required=True)
+    a.add_argument("--schedule-id",help="live activity id for optional atomic staging fence")
+    a.add_argument("--schedule-owner")
+    a.add_argument("--schedule-generation",type=int)
     a=sub.add_parser("outbox-drain")
     a.add_argument("--once",action="store_true",required=True)
     a.add_argument("--limit",type=int,default=3)
@@ -163,6 +167,35 @@ def parser():
     a.add_argument("--evidence",required=True)
     a.add_argument("--reason")
     a.add_argument("--retry-at")
+    a=sub.add_parser("schedule-add")
+    a.add_argument("--logical-key",required=True)
+    a.add_argument("--kind",choices=("work","promise","social","research","maintenance"),required=True)
+    a.add_argument("--priority",type=int,default=50)
+    a.add_argument("--weight",type=int,default=50)
+    a.add_argument("--deadline")
+    a.add_argument("--switch-cost",type=int,default=4)
+    a.add_argument("--work-id")
+    a=sub.add_parser("schedule-sync")
+    a.add_argument("--limit",type=int,default=100)
+    sub.add_parser("schedule-assess")
+    a=sub.add_parser("schedule-next")
+    a.add_argument("--owner",required=True)
+    a=sub.add_parser("schedule-checkpoint")
+    a.add_argument("id")
+    a.add_argument("--owner",required=True)
+    a.add_argument("--generation",type=int,required=True)
+    a.add_argument("--state-file",required=True)
+    a.add_argument("--yield",dest="yield_activity",action="store_true")
+    a=sub.add_parser("schedule-complete")
+    a.add_argument("id")
+    a.add_argument("--owner",required=True)
+    a.add_argument("--generation",type=int,required=True)
+    a.add_argument("--evidence",required=True)
+    a=sub.add_parser("schedule-cancel")
+    a.add_argument("id")
+    a.add_argument("--reason",required=True)
+    a=sub.add_parser("schedule-status")
+    a.add_argument("--limit",type=int,default=50)
     return p
 
 
@@ -241,11 +274,42 @@ def main(argv=None):
                 actor=bound[0]["value"]
                 if args.actor is not None and args.actor!=actor:
                     raise ValueError("staged actor differs from verified CrewQuay actor; use --producer-id for worker identity")
+                supplied=(args.schedule_id,args.schedule_owner,args.schedule_generation)
+                if any(v is not None for v in supplied) and not all(v is not None for v in supplied):
+                    raise ValueError("schedule id, owner and generation must be provided together")
+                schedule_context=({"id":args.schedule_id,"owner":args.schedule_owner,
+                                   "generation":args.schedule_generation}
+                                  if all(v is not None for v in supplied) else None)
                 ident=Outbox(db).stage(args.logical_key,actor,args.action,args.target,
-                                        payload,now,producer_id=args.producer_id)
+                                        payload,now,producer_id=args.producer_id,
+                                        schedule_context=schedule_context)
                 result={"outbox_id":ident,"status":"prepared","sent":False,
                         "executor_actor":actor,"producer_id":args.producer_id,
                         "dispatch_requested":bool(args.dispatch_now)}
+            elif args.command=="schedule-add":
+                ident=Scheduler(db,cfg.lease_seconds).register(
+                    args.logical_key,args.kind,now,priority_score=args.priority,
+                    weight=args.weight,deadline=timestamp(args.deadline),
+                    switch_cost=args.switch_cost,work_id=args.work_id)
+                result={"activity_id":ident,"model_invoked":False}
+            elif args.command=="schedule-sync":
+                result={"activities_registered":Scheduler(db,cfg.lease_seconds).sync_work(now,args.limit),
+                        "model_invoked":False}
+            elif args.command=="schedule-assess":
+                result=Scheduler(db,cfg.lease_seconds).assess(now)
+            elif args.command=="schedule-next":
+                result=Scheduler(db,cfg.lease_seconds).dispatch(args.owner,now)
+            elif args.command=="schedule-checkpoint":
+                result=Scheduler(db,cfg.lease_seconds).checkpoint(
+                    args.id,args.owner,args.generation,now,evidence(args.state_file),
+                    voluntary=args.yield_activity)
+            elif args.command=="schedule-complete":
+                result=Scheduler(db,cfg.lease_seconds).complete(
+                    args.id,args.owner,args.generation,now,evidence(args.evidence))
+            elif args.command=="schedule-cancel":
+                result=Scheduler(db,cfg.lease_seconds).cancel(args.id,now,args.reason)
+            elif args.command=="schedule-status":
+                result=Scheduler(db,cfg.lease_seconds).snapshot(now,args.limit)
             elif args.command=="outbox-drain":
                 if not args.once:
                     raise ValueError("outbox-drain is deliberately single-shot: pass --once")
