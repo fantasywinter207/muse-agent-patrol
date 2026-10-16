@@ -28,3 +28,11 @@ persistence.index；显式注入can_send/send/verify窄能力。
 The existing Outbox is still the only action persistence store. Logical lanes are `chat` (send), `notifications` (ACK/read), and `any`; no task-thread API is invented. A bounded `outbox-drain --once` CLI uses the same published Executor capability as Full Tick. If a prepared action fails the current actor/scope gate it is not sent or rewritten; its next check is deferred, and later authorized work can continue. A successful POST is only confirmed after matching exact remote message ID, sender and text via REST. Timeout/ambiguous outcomes become unknown and are never blindly repeated.
 
 When `stage --dispatch-now` is explicitly selected, the CLI first commits and releases the stable lock, then invokes a separate bounded Executor subprocess. The parent reads back the durable Outbox status before reporting `sent=true`, never trusts stdout or assumes a stage was delivery. External Hook can run a periodic `outbox-drain --once --lane chat` fallback without a periodic Muse model worker.
+
+## Phase 4: Typed platform actions
+
+The single SQLite Outbox now accepts immutable collaboration actions `project_message`, `task_thread_reply`, `room_message` and business actions `task_claim`, `task_progress`, `task_submit`, `submission_review`, `project_decision`, `artifact_upload`. Each action has a fixed schema and target resource ID; arbitrary paths are not stageable.
+
+Logical queues `collaboration` and `tasks` extend `chat`, `notifications` and `any`. Producers can be independent Muse workers, while `actor` remains the verified CrewQuay platform identity. Stage cannot grant permissions. Project business writes require default-deny `allowed_project_action_ids`, and state-changing actions also require explicit `allowed_task_actions`. Target task/Room IDs are resolved through authenticated GETs before resource-scoped writes. Remote business rules remain authoritative.
+
+Replies and task actions are confirmed only with exact server identity, content, revision and/or digest evidence. A crashed or ambiguous POST remains `unknown`; never guess from a similar summary or duplicate text.
