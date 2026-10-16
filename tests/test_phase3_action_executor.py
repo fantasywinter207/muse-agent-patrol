@@ -148,6 +148,10 @@ class Phase3Tests(unittest.TestCase):
             # If stage still held the lock this would raise Busy.
             with instance_lock(str(self.db.path)+".tick.lock"):
                 pass
+            with self.db.transaction() as c:
+                c.execute("""UPDATE outbox SET status='confirmed',
+                    remote_id='mock-readback-1',result='{"id":"mock-readback-1"}'
+                    WHERE logical_key='immediate'""")
             self.assertIn("outbox-drain",command)
             self.assertIn("--once",command)
             self.assertIn("--id",command)
@@ -165,8 +169,9 @@ class Phase3Tests(unittest.TestCase):
         result=json.loads(out.getvalue())
         self.assertTrue(result["sent"])
         self.assertEqual(result["status"],"confirmed")
-        # Fake child doesn't modify durable Outbox; never assert production delivery based on it.
-        self.assertEqual(self.db.read("SELECT status FROM outbox")[0]["status"],"prepared")
+        # The mocked child wrote a confirmed DB row; the caller trusts DB,
+        # not just what the child claimed on stdout.
+        self.assertEqual(self.db.read("SELECT status FROM outbox")[0]["status"],"confirmed")
 
     def test_cli_dispatch_failure_keeps_prepared_work_without_false_success(self):
         payload=Path(self.tmp.name)/"reply.json"
@@ -185,12 +190,30 @@ class Phase3Tests(unittest.TestCase):
         self.assertEqual(result["dispatch"]["status"],"authorization_failed")
         self.assertEqual(self.db.read("SELECT status FROM outbox")[0]["status"],"prepared")
 
+    def test_immediate_dispatch_does_not_trust_forged_child_success(self):
+        payload=Path(self.tmp.name)/"reply.json"
+        payload.write_text('{"content":"hello"}',encoding="utf-8")
+        out=io.StringIO()
+        # Child output claims confirmation but neither POST nor durable
+        # readback happened. Parent must not claim a message was delivered.
+        with patch("patrol.components.runtime.composition.cli.subprocess.run",
+                   return_value=SimpleNamespace(returncode=0,stdout=json.dumps(
+                       {"status":"ok","item_status":"confirmed","confirmed":1}))):
+            with contextlib.redirect_stdout(out):
+                code=main(["--db",str(self.db.path),"stage","send",
+                           "--logical-key","fake-success","--target","owner",
+                           "--payload-file",str(payload),"--dispatch-now"])
+        self.assertEqual(code,0)
+        result=json.loads(out.getvalue())
+        self.assertFalse(result["sent"],result)
+        self.assertEqual(result["outbox_status"],"prepared")
+        self.assertEqual(self.db.read("SELECT status FROM outbox")[0]["status"],"prepared")
+
     def test_full_tick_and_executor_share_authorization_policy(self):
         tick=Tick(self.db,self.cfg)
         tick.actor="crewquay-agent"
         row={"actor":"crewquay-agent","target":"unapproved","action":"send",
              "payload":{"content":"hello"}}
-        self.assertEqual(tick.can_send(row),ActionSender(self.db,self.cfg)._same_can_send_test(row) if False else tick.can_send(row))
         self.assertFalse(tick.can_send(row)[0])
         self.assertFalse(ActionSender(self.db,self.cfg).can_send(row)[0])
 
