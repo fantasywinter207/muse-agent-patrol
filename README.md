@@ -356,18 +356,18 @@ Outbox 保留逻辑键和 `idem_key`，发送方使用租约/版本防止旧执�
 
 ```sh
 # 仅创建宿主唤醒租约，不执行 Muse 推理、也不占有调度时间片
-python3 -m patrol --config /private/config.json host-wakeup-prepare --owner hatch-hook
+python3 -m patrol --config /private/config.json host-wakeup-prepare --owner crewquay-hatch-hook
 
 # 宿主确实收到并可核验接受时，使用已有的回执入口
 python3 -m patrol --config /private/config.json wakeup-ack WAKEUP_ID \
-  --owner hatch-hook --lease-version WAKEUP_GENERATION \
+  --owner crewquay-hatch-hook --lease-version WAKEUP_GENERATION \
   --result accepted --evidence /private/host-receipt.json
 
 # 真正的 Muse Worker 再领取与执行独立活动
 python3 -m patrol --config /private/config.json schedule-next --owner muse-worker
 ```
 
-`wake()` 被调用或脚本结束**本身不是宿主已接受的证据**；没有可信回执就不得自动标记 `accepted`。未确认的租约到期会变为 `unknown`，仅在确认未投递后才可明确恢复重试，防止无限重复唤醒。宿主唤醒租约与 Scheduler 时间片代次是两组不同凭据。
+`wake()` 被调用或脚本结束**本身不是宿主已接受的证据**；没有可信回执就不得自动标记 `accepted`。未确认的租约到期会变为 `unknown`，仅在确认未投递后才可明确恢复重试，防止无限重复唤醒。宿主唤醒租约与 Scheduler 时间片代次是两组不同凭据。 Hook 默认 Owner 为 `crewquay-hatch-hook`，若设置 `CREWQUAY_HOOK_OWNER`，确认回执必须使用相同 Owner。
 
 此文件仍是参考脚本；仓库不会安装 Hook、持有模型会话或设置后台任务。当前 `wakeup_requests` 只包含工作与承诺来源：手动 `schedule-add social` 只是登记活动，不会自动产生社交唤醒。
 
