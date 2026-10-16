@@ -313,10 +313,13 @@ class Collector:
                 waterline=cursor(str(b.get("waterline","")))
                 deleted=cursor(str(b.get("deletedThrough","")))
                 more=b.get("hasMore")
+                if (int(after)<int(deleted) or (stream and sid!=stream)):
+                    self.sync.failure(source,scope,now)
+                    self.errors.append({"source":source,
+                                        "code":"AGENT_EVENTS_RESYNC_REQUIRED"})
+                    return "resync_required"
                 if (not isinstance(sid,str) or not sid or type(more) is not bool
-                        or (stream and sid!=stream)
                         or (target and upper!=target)
-                        or int(after)<int(deleted)
                         or int(upper)>int(waterline)
                         or int(nxt)<int(after) or int(nxt)>int(upper)
                         or (more and int(nxt)==int(after))
