@@ -29,7 +29,7 @@ if flock -n 9; then
   # can POST. An unknown remote result is readback-checked, never blindly resent.
   DRAIN_EXIT=0
   (cd "$REPO" && timeout 25s python3 -m patrol \
-    --config "$CONFIG" --db "$DB" outbox-drain --once --lane chat \
+    --config "$CONFIG" --db "$DB" outbox-drain --once --lane any \
     --limit 3 >/dev/null 2>&1) || DRAIN_EXIT=$?
   log "phase3 executor compensation exit=${DRAIN_EXIT}"
 else
