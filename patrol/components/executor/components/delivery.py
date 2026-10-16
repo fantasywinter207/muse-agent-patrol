@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 from ...attention.index import Attention
 from ...collection.index import Collector, Sync, event_time
+from ...persistence.index import canonical
 from ...outbox.index import Outbox
 from ...transport.index import AuthError
 
@@ -125,6 +126,8 @@ class ActionSender:
             if action_id:
                 row=self.db.read("SELECT status FROM outbox WHERE id=?",(action_id,))
                 report["item_status"]=row[0]["status"] if row else "not_found"
+                if report["item_status"]=="not_found":
+                    report["status"]="not_found"
             return report
         if self.client is None:
             report["status"]="authorization_failed"
@@ -145,7 +148,8 @@ class ActionSender:
                               for x in report["outbox_attempts"])
         report["blocked"]=sum(x.get("status")=="blocked"
                               for x in report["outbox_attempts"])
-        if report["blocked"] or report["unknown"]:
+        if (report["blocked"] or report["unknown"]
+                or any(x["status"] not in ("confirmed","blocked") for x in report["outbox_attempts"])):
             report["status"]="degraded"
         elif report["outbox_attempts"]:
             report["status"]="ok"
