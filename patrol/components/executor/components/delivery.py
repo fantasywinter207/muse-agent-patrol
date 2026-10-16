@@ -100,7 +100,7 @@ class ActionSender:
         # endpoint-specific readback contract is supplied. Never replay them blindly.
         return None
 
-    def drain_once(self, limit=3, action_id=None):
+    def drain_once(self, limit=3, action_id=None, lane="any"):
         """Deliver only bounded, due durable Outbox actions; NO full patrol.
 
         Authentication and platform identity are checked before network writes.
@@ -112,6 +112,8 @@ class ActionSender:
             raise ValueError("limit must be between 1 and 50")
         if action_id is not None and (not isinstance(action_id,str) or not action_id):
             raise ValueError("nonempty Outbox ID required")
+        if lane not in ("any","chat","notifications"):
+            raise ValueError("unsupported action lane")
         now=self.clock()
         report={"mode":"outbox_once","status":"idle","outbox_attempts":[],
                 "confirmed":0,"unknown":0,"blocked":0,
@@ -121,11 +123,13 @@ class ActionSender:
             return report
         self.outbox.recover(now,self.config.lease_seconds)
         selection=" AND id=?" if action_id is not None else ""
+        scope={"any":"","chat":" AND action='send'",
+               "notifications":" AND action IN ('ack','read')"}[lane]
         params=(now,action_id) if action_id is not None else (now,)
         # Check due work before loading credentials or making an API request.
         due=self.db.read("""SELECT id FROM outbox WHERE
             status IN ('prepared','retry_wait','unknown') AND next_attempt_at<=?"""+
-            selection+" ORDER BY created_at LIMIT 1",params)
+            selection+scope+" ORDER BY created_at LIMIT 1",params)
         if not due:
             if action_id:
                 row=self.db.read("SELECT status FROM outbox WHERE id=?",(action_id,))
@@ -142,7 +146,7 @@ class ActionSender:
         report["verified_actor"]=self.actor
         report["outbox_attempts"]=self.outbox.process(
             self.clock(),self.can_send,self.send,self.verify,limit=limit,
-            action_id=action_id)
+            action_id=action_id,lane=lane)
         if action_id:
             row=self.db.read("SELECT status FROM outbox WHERE id=?",(action_id,))
             report["item_status"]=row[0]["status"] if row else "not_found"
