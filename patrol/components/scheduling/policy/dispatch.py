@@ -118,7 +118,7 @@ class Scheduler:
                 lease_version=lease_version+1,last_updated=?,
                 preempt_reason='source work already completed'
                 WHERE work_id IN (SELECT id FROM work_items WHERE status='done')
-                AND status IN ('ready','suspended')""",(now,))
+                AND status IN ('ready','suspended','running')""",(now,))
         return added
 
     @staticmethod
