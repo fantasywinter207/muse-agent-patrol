@@ -79,6 +79,7 @@ def parser():
     a=sub.add_parser("outbox-drain")
     a.add_argument("--once",action="store_true",required=True)
     a.add_argument("--limit",type=int,default=3)
+    a.add_argument("--lane",choices=("any","chat","notifications"),default="any")
     a.add_argument("--id")
     r=sub.add_parser("resolve")
     r.add_argument("id")
@@ -233,7 +234,7 @@ def main(argv=None):
                     raise ValueError("outbox-drain is deliberately single-shot: pass --once")
                 client=Client(cfg,credential_provider(cfg)) if cfg.allow_writes else None
                 result=ActionSender(db,cfg,client).drain_once(
-                    limit=args.limit,action_id=args.id)
+                    limit=args.limit,action_id=args.id,lane=args.lane)
             elif args.command=="resolve":
                 Outbox(db).resolve(args.id,evidence(args.evidence),now,args.confirmed,args.proven_absent)
                 result={"resolved":args.id,"remote_request_issued":False}
