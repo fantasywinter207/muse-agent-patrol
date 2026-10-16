@@ -69,23 +69,6 @@ class Outbox:
         consumed=0
         for row in rows:
             row["payload"]=json.loads(row["payload"])
-            # Scope and current actor must be verified for every network call,
-            # including readback of an unknown operation.
-            allowed,reason=can_send(row)
-            if not allowed:
-                self.db.alert("outbox_block:"+row["id"],"outbox_blocked",
-                              {"id":row["id"],"reason":reason},now)
-                # Defer the *same* immutable request for a bounded interval.
-                # Never mutate the target, actor, or idempotency key to make
-                # a rejected action appear authorized. Later eligible rows
-                # can be consumed in the same invocation.
-                with self.db.transaction() as c:
-                    c.execute("""UPDATE outbox SET next_attempt_at=?
-                        WHERE id=? AND status IN ('prepared','retry_wait','unknown')
-                        AND next_attempt_at<=?""",(now+300,row["id"],now))
-                report.append({"id":row["id"],"action":row["action"],
-                               "status":"blocked"})
-                continue
             if row["status"]=="unknown":
                 # This never retries the POST: only readback/reconciliation.
                 try:
@@ -100,6 +83,19 @@ class Outbox:
                                   (now+300,row["id"]))
                 consumed+=1
             else:
+                allowed,reason=can_send(row)
+                if not allowed:
+                    self.db.alert("outbox_block:"+row["id"],"outbox_blocked",
+                                  {"id":row["id"],"reason":reason},now)
+                    # Defer without altering actor/target/idempotency.
+                    # A rejected head must not starve later authorized items.
+                    with self.db.transaction() as c:
+                        c.execute("""UPDATE outbox SET next_attempt_at=?
+                            WHERE id=? AND status IN ('prepared','retry_wait')
+                            AND next_attempt_at<=?""",(now+300,row["id"],now))
+                    report.append({"id":row["id"],"action":row["action"],
+                                   "status":"blocked"})
+                    continue
                 token=new_id()
                 with self.db.transaction() as c:
                     won=c.execute("""UPDATE outbox SET status='sending',
