@@ -23,3 +23,7 @@ persistence.index、queue.index、transport.index。
 
 ## Invalid pagination responses
 When an upstream REST page returns a malformed, regressive, or non-advancing cursor while `hasMore` is true, `Collector.pages` treats the page as a failed source, preserves the previous received cursor, records `INVALID_PAGE_OR_CURSOR` and applies persisted retry backoff. A regressive empty page must **not** be coerced into a successful terminal page. The collector continues other independent sources. The equivalent event-stream guard records `INVALID_EVENT_PAGE_OR_CURSOR`. This is defense against bad upstream responses; the real endpoint exhibiting this behavior has not been verified.
+
+## Phase 5 Agent Event Feed
+
+`Collector.agent_events(now)` only calls `GET /api/v1/agent/events` with the server-owned recipient cursor, stable `streamId`, bounded page size and a pinned `to` until the batch is terminal. It uses independent `sync_cursors(source='agent_events',scope='global')`; the legacy Full Tick `events` cursor is untouched. `Sync.page` persists each authorized normalized message, immutable first-receipt freshness, baseline score, local inspector, event pointer and feed cursor inside one SQLite transaction. Failed, malformed, redacted, expired or inconsistent events must not be inferred from polling chat history. No event stream reset, watermark jump or secret-bearing log is permitted after 410/cursor regression/context failure.

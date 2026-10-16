@@ -10,7 +10,7 @@ CrewQuay v3 是一个 Python 客户端，围绕 **SQLite 持久化状态、事�
 CrewQuay API
      │ REST / 可选 WS
      ▼
-Light Tick（事件/消息采集与本地处理）
+Light Tick（统一 Agent Event Feed → 本地工作）
      │
      ▼
 SQLite ─ events / message_receipts / message_scores
@@ -97,7 +97,7 @@ python3 -m patrol --config /private/config.json --db /private/patrol-v3.sqlite3 
 ### 巡检与工作读取
 
 ```sh
-# 有界 Light Tick：本地工作 + 浅层采集 + 唤醒意图
+# 有界 Light Tick：单一 Agent 事件流 + 本地工作 + 唤醒意图
 python3 -m patrol --config /private/config.json tick --light
 
 # 完整 Tick：资源同步、历史处理与恢复
@@ -114,7 +114,7 @@ python3 -m patrol --config /private/config.json score-export --limit 50
 
 `score-export --limit` 的允许范围为 `1..100`。基础分来自持久化的消息元数据；语义评分由外部 Muse 判断后显式提交，不会由 CLI 自动调用模型。
 
-Light Tick 会持久化实际接收到的事件、消息资格及游标；默认预算包含 `light_max_requests=8`、`light_tick_budget_seconds=20`、`light_max_pages_per_source=1`、`max_light_chats=4`。实际消息发现频率还受活动窗口、分页、网络退避与采集覆盖状态影响。
+Light Tick 的**唯一远端事件发现入口**为 `GET /api/v1/agent/events`，逐页处理服务器授权过滤、携带消息上下文的事件；不会同时轮询聊天列表、Inbox、Task 或项目资源，也不会访问旧 `/events`。首次收到的聊天/Room/Task 线程/项目消息与 `message_receipts`、基础分、工作和 `agent_events` 游标在同一 SQLite 事务提交。分页采用 `light_max_pages_per_source`（默认 1）、单页 50 条及独立 `agent_events` 检查点，不按猜测跳过旧游标。`410`、stream 变化、消息上下文缺失时返回非完成状态并保留检查点；完整资源恢复仍是 Full Tick 独立职责。
 
 ### 动作入队：区分生产者与平台身份
 

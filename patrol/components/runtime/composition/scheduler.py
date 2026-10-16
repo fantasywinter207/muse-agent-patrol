@@ -59,7 +59,27 @@ class Tick(ActionSender):
                 row=rows[0]
                 value=json.loads(row["payload"])
                 evidence={"event_id":row["id"],"payload_sha256":hashlib.sha256(row["payload"].encode()).hexdigest(),"kind":"durable_resource_snapshot"}
-                if row["source"] in ("events","legacy_pending","live"):
+                if row["source"]=="agent_events":
+                    kind=value.get("type","")
+                    if kind=="event.redacted":
+                        evidence["kind"]="redacted_agent_event"
+                    elif isinstance(value.get("message"),dict):
+                        # Normalized message, receipt and inspector are
+                        # durably persisted in the exact source page txn.
+                        evidence["kind"]="server_authorized_message_staged"
+                    else:
+                        created=event_time(value.get("createdAt"),0)
+                        fresh=created>0 and now-self.config.max_event_age_seconds<=created<=now+self.config.future_skew_seconds
+                        # Generic events become Muse-decision work. Server
+                        # governs visibility; catch-up work has lower priority.
+                        priority=75 if fresh else 45
+                        self.queue.enqueue("agent:event:"+str(value.get("eventId") or row["external_key"]),
+                                           "human_action",
+                                           {"event_id":row["id"],"reason":"authorized platform event for Muse decision",
+                                            "event_type":kind},
+                                           now,start_by=now+180,priority=priority,event_id=row["id"])
+                        evidence["kind"]="agent_event_decision_staged"
+                elif row["source"] in ("events","legacy_pending","live"):
                     if not self.collector:
                         self.queue.finish(item,now,status="retry_wait",reason="offline: REST confirmation required",retry_at=now+60)
                         continue
@@ -143,10 +163,10 @@ class Tick(ActionSender):
         return done
 
     def run_light(self):
-        """One bounded incremental turn: no outbox writes, WS, or full backfill.
+        """Bounded Phase 5 event-driven turn, with no writes or resource scans.
 
-        This is not a 60-second message delivery guarantee. Idle cursors can
-        still be scheduled 600s apart and server event history may lag.
+        /agent/events is the sole remote discovery feed. Resource snapshots,
+        historic resync and side-effect execution are outside Light Tick.
         """
         self.run_id=new_id()
         start=self.clock()
@@ -175,71 +195,15 @@ class Tick(ActionSender):
                 if not known:
                     report["completed_work"]+=self.execute(
                         max(1,self.config.max_work_per_tick//2),local_only=True)
-                now=self.clock()
-                # When full patrol has established an event stream, poll its
-                # waterline every light tick. Shallow replay catches new event
-                # pointers even when idle chat cursors are sleeping. No guessed
-                # bootstrap or waterline jump on stream mismatch.
-                checkpoint=self.sync.state("events","global")
-                if checkpoint["stream"] and checkpoint["stream"]!="!resync-required":
-                    if checkpoint["failures"] and checkpoint["next_at"]>now:
-                        report["incomplete_sources"].append("event_stream_backoff")
-                    else:
-                        response=self.client.request("GET","/api/v1/events?limit=1")
-                        body=response.body
-                        if (response.status==200 and isinstance(body,dict)
-                                and body.get("streamId") and body.get("waterline") is not None):
-                            if (checkpoint["stream"]==body["streamId"]
-                                    and int(checkpoint["received"])<=int(body["waterline"])):
-                                event_result=self.collector.events(str(body["waterline"]),
-                                    body["streamId"],self.clock(),force=True)
-                                report["event_replay"]=event_result
-                                if event_result!="complete":
-                                    report["incomplete_sources"].append("event_stream:"+event_result)
-                            else:
-                                report["incomplete_sources"].append("event_stream_requires_full_resync")
-                        else:
-                            report["incomplete_sources"].append("event_waterline_unavailable")
-                else:
-                    report["incomplete_sources"].append("event_stream_requires_full_bootstrap")
-                # Only shallow chat discovery, capped per-source; never force
-                # historical cursor resets or scan every resource in light mode.
-                if self.sync.state("chats","global")["next_at"]<=now:
-                    if not self.collector.pages("chats","global","/api/v1/chats",now):
-                        report["incomplete_sources"].append("chats")
-                targets=set(self.config.allowed_chat_ids)
-                visible=self.db.read("SELECT value FROM meta WHERE key='visible_chats'")
-                if visible:
-                    targets.update(json.loads(visible[0]["value"]))
-                due=self.attention.due(now)
-                active={row["target"] for row in due if row["state"]!="idle"}
-                targets.update(active)
-                # Treat error backoff as binding; only due chat cursors.
-                candidates=[]
-                for cid in targets:
-                    cp=self.sync.state("messages",cid)
-                    if cp["next_at"]<=now:
-                        candidates.append((0 if cid in active else 1,cp["next_at"],cid))
-                candidates.sort()
-                for _,__,cid in candidates[:self.config.max_light_chats]:
-                    ok=self.collector.pages("messages",cid,
-                        "/api/v1/chats/"+quote(cid,safe="")+"/messages",
-                        self.clock(),interval=(self.config.active_scan_seconds
-                           if cid in active else self.config.normal_scan_seconds))
-                    if not ok:
-                        report["incomplete_sources"].append("messages:"+cid)
-                    elif cid in active:
-                        self.attention.checked(cid,self.clock())
-                if len(candidates)>self.config.max_light_chats:
-                    report["incomplete_sources"].append("chat_scan_capacity")
-                # Fetch a single page of notifications only when due. An old
-                # inbox cursor is *not* skipped to the newest item.
-                if self.sync.state("inbox","global")["next_at"]<=self.clock():
-                    if not self.collector.pages("inbox","global","/api/v1/inbox",self.clock()):
-                        report["incomplete_sources"].append("inbox")
+                # Phase 5 Light Tick uses exactly ONE remote discovery path:
+                # /agent/events. No chat, inbox, task/project pagination,
+                # legacy event probe or WebSocket in this execution mode.
+                event_result=self.collector.agent_events(self.clock())
+                report["event_replay"]=event_result
+                report["event_source"]="agent_events"
+                if event_result!="complete":
+                    report["incomplete_sources"].append("agent_events:"+event_result)
                 report["errors"].extend(self.collector.errors)
-                # Streaming replay is handled by full tick until a verified
-                # low-cost event-only endpoint/contract is available.
             report["completed_work"]+=self.execute(self.config.max_work_per_tick)
         except (BudgetExceeded,AuthError) as e:
             report["status"]="deferred" if isinstance(e,BudgetExceeded) else "authorization_failed"

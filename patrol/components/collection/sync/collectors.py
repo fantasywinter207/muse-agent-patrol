@@ -63,6 +63,43 @@ class Sync:
                     receipt_tx(c,row["id"],original,row["observed_at"],
                                self.max_event_age_seconds,self.future_skew_seconds)
                     score=baseline_tx(c,row["id"],original,row["observed_at"])
+                elif source=="agent_events":
+                    score=60
+                    # A normalized message accompanies a server-visible event.
+                    # Persist its first receipt, baseline, and inspector within
+                    # the same cursor-advance transaction: no crash gap.
+                    msg=item.get("message")
+                    if isinstance(msg,dict):
+                        kind=msg.get("scopeType")
+                        scope_id=msg.get("scopeId")
+                        mid=msg.get("messageId")
+                        if (kind not in ("chat","room","project","task")
+                                or not isinstance(scope_id,str) or not scope_id
+                                or not isinstance(mid,str) or not mid
+                                or not isinstance(msg.get("senderId"),str)
+                                or not isinstance(msg.get("content"),str)
+                                or not isinstance(msg.get("createdAt"),str)):
+                            raise ValueError("invalid authorized event message")
+                        mscope=(scope_id if kind in ("chat","room")
+                                else kind+":"+scope_id)
+                        normalized={"messageId":mid,"senderId":msg["senderId"],
+                                    "senderKind":msg.get("senderKind","agent"),
+                                    "content":msg["content"],"createdAt":msg["createdAt"],
+                                    "scopeType":kind,"scopeId":scope_id}
+                        c.execute("""INSERT INTO events(source,scope,stream,external_key,cursor,payload,observed_at)
+                            VALUES('messages',?,'',?,NULL,?,?)
+                            ON CONFLICT(source,scope,stream,external_key) DO NOTHING""",
+                            (mscope,mid,canonical(normalized),now))
+                        mrow=c.execute("""SELECT id,payload,observed_at FROM events
+                            WHERE source='messages' AND scope=? AND stream='' AND external_key=?""",
+                            (mscope,mid)).fetchone()
+                        original=json.loads(mrow["payload"])
+                        receipt_tx(c,mrow["id"],original,mrow["observed_at"],
+                                   self.max_event_age_seconds,self.future_skew_seconds)
+                        mscore=baseline_tx(c,mrow["id"],original,mrow["observed_at"])
+                        enqueue_tx(c,"event:"+str(mrow["id"]),"inspect_event",
+                                   {"event_id":mrow["id"]},now,event_id=mrow["id"],
+                                   start_by=now+180,priority=mscore)
                 else:
                     score=40 if source in ("events","live") else 10
                 enqueue_tx(c,"event:"+str(row[0]),"inspect_event",{"event_id":row[0]},
@@ -233,6 +270,86 @@ class Collector:
                     items=body if isinstance(body,list) else [body]
                     self.sync.page("projects",pid+suffix,"",items,"0",now,next_at=now+self.config.normal_scan_seconds)
         return complete
+
+    def agent_events(self, now):
+        """Incremental Phase 5 feed, never a chat/inbox/project polling fallback.
+
+        The server's exact recipient feed is authoritative for a single actor.
+        Keep a separate checkpoint from legacy Full Tick event replay. Every
+        page atomically persists normalized messages, work and cursor. Cursor
+        loss/410/stream changes require explicit recovery, never skip history.
+        """
+        source,scope="agent_events","global"
+        state=self.sync.state(source,scope)
+        if state["failures"] and state["next_at"]>now:
+            return "backoff"
+        after=state["received"]
+        target=state["target"]
+        stream=state["stream"]
+        for _ in range(self.config.light_max_pages_per_source):
+            params={"after":after,"limit":50}
+            if target:
+                params["to"]=target
+            try:
+                reply=self.request("GET","/api/v1/agent/events?"+urlencode(params))
+            except BudgetExceeded:
+                return "incomplete"
+            if reply.status in (410,422):
+                self.sync.failure(source,scope,now,reply.retry_after)
+                self.errors.append({"source":source,"code":"AGENT_EVENTS_RESYNC_REQUIRED",
+                                    "http":reply.status})
+                return "resync_required"
+            if reply.status!=200:
+                self.sync.failure(source,scope,now,reply.retry_after)
+                self.errors.append({"source":source,"status":reply.status})
+                return "failed"
+            try:
+                b=reply.body
+                if not isinstance(b,dict) or not isinstance(b.get("items"),list):
+                    raise ValueError("invalid agent event page")
+                sid=b.get("streamId")
+                nxt=cursor(str(b.get("nextCursor","")))
+                upper=cursor(str(b.get("to","")))
+                waterline=cursor(str(b.get("waterline","")))
+                deleted=cursor(str(b.get("deletedThrough","")))
+                more=b.get("hasMore")
+                if (int(after)<int(deleted) or (stream and sid!=stream)):
+                    self.sync.failure(source,scope,now)
+                    self.errors.append({"source":source,
+                                        "code":"AGENT_EVENTS_RESYNC_REQUIRED"})
+                    return "resync_required"
+                if (not isinstance(sid,str) or not sid or type(more) is not bool
+                        or (target and upper!=target)
+                        or int(upper)>int(waterline)
+                        or int(nxt)<int(after) or int(nxt)>int(upper)
+                        or (more and int(nxt)==int(after))
+                        or (not more and nxt!=upper)):
+                    raise ValueError("invalid event feed stream or cursor")
+                for item in b["items"]:
+                    if not isinstance(item,dict):
+                        raise ValueError("invalid event item")
+                    if item.get("type")=="event.redacted":
+                        continue
+                    if item.get("type") in (
+                            "chat.message.created","chat.mentioned",
+                            "room.message.created","room.mentioned","message.created"):
+                        if item.get("contextUnavailable") or not isinstance(item.get("message"),dict):
+                            raise ValueError("event message context unavailable")
+                    if not isinstance(item.get("type"),str) or not item["type"]:
+                        raise ValueError("invalid event type")
+                self.sync.page(source,scope,sid,b["items"],nxt,now,
+                               target=upper if more else None,
+                               next_at=now if more else now+self.config.active_scan_seconds)
+            except (ValueError,TypeError,OverflowError):
+                self.sync.failure(source,scope,now)
+                self.errors.append({"source":source,"code":"INVALID_AGENT_EVENT_PAGE"})
+                return "failed"
+            if not more:
+                return "complete"
+            after=nxt
+            target=upper
+            stream=sid
+        return "incomplete"
 
     def events(self, waterline, stream, now, force=False):
         waterline=cursor(str(waterline))

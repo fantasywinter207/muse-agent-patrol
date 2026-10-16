@@ -52,3 +52,7 @@ A live test is still necessary for actual throughput and host permissions: (1) k
 ## Phase 5 generic Agent protocol
 
 `test_phase5_platform_protocol.py` uses fake authenticated platform catalog/resource/receipt APIs and temporary SQLite. It tests new dynamic action names without new routing code, deny-by-default project and action permissions, duplicate trigger suppression, exact request digest, and crash-ambiguous POST recovery using `requestId` without a second POST. No production API calls occur in CI.
+
+## Phase 5 Light Tick event-only collection
+
+`tests/test_phase5_light_event_only.py` uses temporary SQLite + a fake authenticated event feed to cover chat/Room/project/Task discussion message normalization, first-observation receipts, baseline scoring, generic task-event wakeup, duplicate replay, typed scopes, redacted/old events, multi-page target pinning, stream mismatch, malformed context/cursors and 410 resync without data loss. `tests/test_phase2_light_wakeup.py` and `tests/test_phase2_invalid_cursor.py` cover the migrated Light Tick entrypoint; Full Tick historical restoration retains its separate tests. No live API or credentials are used. The server adds `agent-event-context.test.ts` for actual recipient visibility and authorized message context.

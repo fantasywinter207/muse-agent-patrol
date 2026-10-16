@@ -31,6 +31,9 @@ class InvalidCursorTests(unittest.TestCase):
 
     def test_light_regressive_empty_page_is_degraded_not_crash(self):
         self.prepare_existing_message()
+        Sync(self.db).page("agent_events","global","stream1",
+                           [{"eventId":"old","cursor":"1","type":"event.redacted"}],
+                           "1",1000)
         calls=[]
         class Fake:
             requests=0
@@ -39,29 +42,27 @@ class InvalidCursorTests(unittest.TestCase):
                 calls.append(path)
                 if path=="/api/v1/agents/me":
                     return Response(200,{"id":"quill"})
-                if "/chats/owner/messages?" in path:
-                    return Response(200,{"items":[],"nextCursor":"0","hasMore":False})
-                return Response(200,{"items":[],"nextCursor":"0","hasMore":False})
+                if path.startswith("/api/v1/agent/events?"):
+                    return Response(200,{"streamId":"stream1","waterline":"2",
+                        "deletedThrough":"0","to":"2",
+                        "items":[],"nextCursor":"0","hasMore":False})
+                raise AssertionError("Legacy Light request: "+path)
         report=Tick(self.db,self.cfg,client=Fake(),clock=lambda:2000).run(light=True)
         self.assertEqual(report["status"],"degraded",report)
-        self.assertIn("messages:owner",report["incomplete_sources"])
-        self.assertIn({"source":"messages","scope":"owner","code":"INVALID_PAGE_OR_CURSOR"},report["errors"])
-        self.assertTrue(any(p.startswith("/api/v1/inbox?") for p in calls),
-                        "bad chat page should not preempt other sources")
-        checkpoint=Sync(self.db).state("messages","owner")
+        self.assertIn("agent_events:failed",report["incomplete_sources"])
+        self.assertIn({"source":"agent_events","code":"INVALID_AGENT_EVENT_PAGE"},report["errors"])
+        self.assertFalse(any(p.startswith("/api/v1/inbox") or "/chats/" in p for p in calls))
+        checkpoint=Sync(self.db).state("agent_events","global")
         self.assertEqual(checkpoint["received"],"1")
         self.assertEqual(checkpoint["failures"],1)
         self.assertGreater(checkpoint["next_at"],2000)
         self.assertEqual(self.db.read("SELECT status FROM patrol_runs")[0]["status"],"degraded")
-        self.assertEqual(self.db.read("SELECT count(*) AS n FROM events")[0]["n"],1)
         self.assertEqual(self.db.read("SELECT count(*) AS n FROM work_items WHERE type='human_action'")[0]["n"],1)
         self.assertEqual(report["wakeup_staged"],1)
-        self.assertFalse(any(p.startswith("/api/v1/chats/owner/messages") and "POST" in p for p in calls))
-        # Persisted backoff prevents a storm of repeated identical page requests.
         calls.clear()
         second=Tick(self.db,self.cfg,client=Fake(),clock=lambda:2001).run(light=True)
-        self.assertNotIn("messages:owner",second["incomplete_sources"])
-        self.assertFalse(any("/chats/owner/messages?" in p for p in calls))
+        self.assertIn("agent_events:backoff",second["incomplete_sources"])
+        self.assertFalse(any("/agent/events?" in p for p in calls))
 
     def test_full_regressive_empty_page_continues_other_sources(self):
         self.prepare_existing_message()
@@ -88,26 +89,26 @@ class InvalidCursorTests(unittest.TestCase):
 
     def test_light_invalid_event_cursor_keeps_checkpoint(self):
         self.prepare_existing_message()
-        Sync(self.db).reset("known-stream","1",900)
+        Sync(self.db).page("agent_events","global","stream1",
+                           [{"eventId":"old","cursor":"1","type":"event.redacted"}],
+                           "1",900)
         class Fake:
             requests=0
             def request(self,method,path,*args):
                 self.requests+=1
                 if path=="/api/v1/agents/me":
                     return Response(200,{"id":"quill"})
-                if path=="/api/v1/events?limit=1":
-                    return Response(200,{"streamId":"known-stream","waterline":"2"})
-                if path.startswith("/api/v1/events?after="):
-                    return Response(200,{"items":[],"nextCursor":"0","hasMore":False})
-                if "/chats/owner/messages?" in path:
-                    return Response(200,{"items":[],"nextCursor":"1","hasMore":False})
-                return Response(200,{"items":[],"nextCursor":"0","hasMore":False})
+                if path.startswith("/api/v1/agent/events?"):
+                    return Response(200,{"streamId":"stream1","waterline":"2",
+                        "deletedThrough":"0","to":"2","items":[],
+                        "nextCursor":"0","hasMore":False})
+                raise AssertionError("unexpected old Light API")
         result=Tick(self.db,self.cfg,client=Fake(),clock=lambda:2000).run(light=True)
         self.assertEqual(result["status"],"degraded",result)
-        self.assertIn("event_stream:failed",result["incomplete_sources"])
-        self.assertIn({"source":"events","scope":"global","code":"INVALID_EVENT_PAGE_OR_CURSOR"},
+        self.assertIn("agent_events:failed",result["incomplete_sources"])
+        self.assertIn({"source":"agent_events","code":"INVALID_AGENT_EVENT_PAGE"},
                       result["errors"])
-        checkpoint=Sync(self.db).state("events","global")
+        checkpoint=Sync(self.db).state("agent_events","global")
         self.assertEqual(checkpoint["received"],"1")
         self.assertGreater(checkpoint["next_at"],2000)
 

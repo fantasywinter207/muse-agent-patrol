@@ -46,10 +46,16 @@ class Phase2Tests(unittest.TestCase):
                 self.requests+=1
                 if path=="/api/v1/agents/me":
                     return Response(200,{"id":"quill"})
-                if "/chats/owner/messages?" in path:
-                    return Response(200,{"items":[{"messageId":"real1","cursor":"1","senderId":"owner",
-                        "content":"need review","createdAt":1000}],"nextCursor":"1","hasMore":False})
-                return Response(200,{"items":[],"nextCursor":"0","hasMore":False})
+                if path.startswith("/api/v1/agent/events?"):
+                    items=[{"eventId":"ev1","cursor":"1","type":"chat.message.created",
+                            "createdAt":"1970-01-01T00:16:40Z",
+                            "message":{"messageId":"real1","scopeType":"chat",
+                                "scopeId":"owner","senderId":"owner","senderKind":"agent",
+                                "content":"need review","createdAt":"1970-01-01T00:16:40Z"}}] if "after=0" in path else []
+                    return Response(200,{"items":items,"nextCursor":"1",
+                        "to":"1","waterline":"1","deletedThrough":"0",
+                        "streamId":"new-stream","hasMore":False})
+                raise AssertionError("Legacy endpoint called: "+path)
         client=Fake()
         a=Tick(self.db,self.cfg,client=client,clock=lambda:1000).run(light=True)
         self.assertEqual(a["mode"],"light")
@@ -176,22 +182,22 @@ class Phase2Tests(unittest.TestCase):
                 calls.append(path)
                 if path=="/api/v1/agents/me":
                     return Response(200,{"id":"quill"})
-                if path=="/api/v1/events?limit=1":
-                    return Response(200,{"streamId":"known-stream","waterline":"1"})
-                if path.startswith("/api/v1/events?after="):
+                if path.startswith("/api/v1/agent/events?"):
                     return Response(200,{"items":[{"eventId":"ev1","cursor":"1",
-                        "type":"event.redacted"}],"nextCursor":"1","hasMore":False})
-                return Response(200,{"items":[],"nextCursor":"0","hasMore":False})
+                        "type":"event.redacted"}],"nextCursor":"1",
+                        "to":"1","waterline":"1","deletedThrough":"0",
+                        "streamId":"agent-stream","hasMore":False})
+                raise AssertionError("Unexpected Light endpoint: "+path)
         result=Tick(self.db,self.cfg,client=Fake(),clock=lambda:1000).run(light=True)
         self.assertEqual(result["event_replay"],"complete")
-        self.assertTrue(any(path.startswith("/api/v1/events?after=") for path in calls))
-        self.assertEqual(self.db.read("SELECT received FROM sync_cursors WHERE source='events'")[0]["received"],"1")
+        self.assertTrue(any(path.startswith("/api/v1/agent/events?after=") for path in calls))
+        self.assertEqual(self.db.read("SELECT received FROM sync_cursors WHERE source='agent_events'")[0]["received"],"1")
         self.assertEqual(len(self.db.read("SELECT * FROM wakeup_requests")),0)
 
     def test_light_respects_event_retry_after(self):
         self.verified()
         Sync(self.db).reset("known-stream","0",900)
-        Sync(self.db).failure("events","global",1000,retry_after=3600)
+        Sync(self.db).failure("agent_events","global",1000,retry_after=3600)
         calls=[]
         class Fake:
             requests=0
@@ -202,8 +208,8 @@ class Phase2Tests(unittest.TestCase):
                     return Response(200,{"id":"quill"})
                 return Response(200,{"items":[],"nextCursor":"0","hasMore":False})
         result=Tick(self.db,self.cfg,client=Fake(),clock=lambda:1001).run(light=True)
-        self.assertIn("event_stream_backoff",result["incomplete_sources"])
-        self.assertFalse(any(path.startswith("/api/v1/events") for path in calls))
+        self.assertIn("agent_events:backoff",result["incomplete_sources"])
+        self.assertFalse(any(path.startswith("/api/v1/agent/events") for path in calls))
 
     def test_low_score_does_not_wake_host(self):
         q=Queue(self.db)
