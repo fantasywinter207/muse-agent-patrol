@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import json
 import platform
+import subprocess
 import sqlite3
 import sys
 import time
@@ -13,6 +14,7 @@ from pathlib import Path
 from ...config.index import load_config
 from ...migration.index import migrate_legacy
 from ...outbox.index import Outbox
+from ...executor.index import ActionSender
 from ...persistence.index import Database, Busy
 from ...promises.index import Promises
 from ...queue.index import Queue, export_pending, MessageScores
@@ -66,9 +68,19 @@ def parser():
     a=sub.add_parser("stage")
     a.add_argument("action",choices=("send","ack","read"))
     a.add_argument("--logical-key",required=True)
-    a.add_argument("--actor",required=True)
+    # --actor is the authenticated CREWQUAY principal, not the Muse worker.
+    # Omit it to derive the actor from the previously verified DB binding.
+    a.add_argument("--actor")
+    a.add_argument("--producer-id")
+    a.add_argument("--dispatch-now",action="store_true",
+                   help="after durable staging, run a separate bounded Executor process")
     a.add_argument("--target",default="")
     a.add_argument("--payload-file",required=True)
+    a=sub.add_parser("outbox-drain")
+    a.add_argument("--once",action="store_true",required=True)
+    a.add_argument("--limit",type=int,default=3)
+    a.add_argument("--lane",choices=("any","chat","notifications"),default="any")
+    a.add_argument("--id")
     r=sub.add_parser("resolve")
     r.add_argument("id")
     r.add_argument("--evidence",required=True)
@@ -203,8 +215,26 @@ def main(argv=None):
             elif args.command=="stage":
                 with open(args.payload_file,encoding="utf-8") as f:
                     payload=json.load(f)
-                ident=Outbox(db).stage(args.logical_key,args.actor,args.action,args.target,payload,now)
-                result={"outbox_id":ident,"status":"prepared","sent":False}
+                # Fail at STAGING instead of silently storing an action that the
+                # authenticated executor can never dispatch. A Hook worker
+                # identity belongs in producer_id, not the platform actor.
+                bound=db.read("SELECT value FROM meta WHERE key='actor'")
+                if not bound:
+                    raise ValueError("verified CrewQuay actor binding required before staging")
+                actor=bound[0]["value"]
+                if args.actor is not None and args.actor!=actor:
+                    raise ValueError("staged actor differs from verified CrewQuay actor; use --producer-id for worker identity")
+                ident=Outbox(db).stage(args.logical_key,actor,args.action,args.target,
+                                        payload,now,producer_id=args.producer_id)
+                result={"outbox_id":ident,"status":"prepared","sent":False,
+                        "executor_actor":actor,"producer_id":args.producer_id,
+                        "dispatch_requested":bool(args.dispatch_now)}
+            elif args.command=="outbox-drain":
+                if not args.once:
+                    raise ValueError("outbox-drain is deliberately single-shot: pass --once")
+                client=Client(cfg,credential_provider(cfg)) if cfg.allow_writes else None
+                result=ActionSender(db,cfg,client).drain_once(
+                    limit=args.limit,action_id=args.id,lane=args.lane)
             elif args.command=="resolve":
                 Outbox(db).resolve(args.id,evidence(args.evidence),now,args.confirmed,args.proven_absent)
                 result={"resolved":args.id,"remote_request_issued":False}
@@ -274,8 +304,43 @@ def main(argv=None):
                     now,evidence=evidence(args.evidence),status=args.status,
                     reason=args.reason,retry_at=retry_at)
                 result={"finished_work":args.id,"status":args.status,"remote_action_issued":False}
-            print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
-            return 0 if result.get("status") not in ("authorization_failed","failed","deferred","degraded","partial") and result.get("imported") is not False else 1
+        # The stage transaction and CLI lock are released BEFORE running the
+        # independent Executor subprocess. It obtains the same stable lock and
+        # verifies the real platform actor before any remote write.
+        if args.command=="stage" and args.dispatch_now:
+            command=[sys.executable,"-m","patrol"]
+            if args.config:
+                command+=["--config",args.config]
+            command+=["--db",cfg.database,"outbox-drain","--once",
+                      "--limit","1","--id",result["outbox_id"]]
+            try:
+                done=subprocess.run(command,text=True,capture_output=True,
+                                    timeout=min(120,max(15,cfg.tick_budget_seconds+10)),
+                                    check=False)
+                try:
+                    dispatch=json.loads(done.stdout)
+                    if not isinstance(dispatch,dict):
+                        raise ValueError("executor response must be a JSON object")
+                    result["dispatch"]={"status":dispatch.get("status","unknown"),
+                                         "item_status":dispatch.get("item_status"),
+                                         "confirmed":dispatch.get("confirmed",0),
+                                         "exit_code":done.returncode}
+                except (ValueError,TypeError):
+                    result["dispatch"]={"status":"unparsed","exit_code":done.returncode}
+            except subprocess.TimeoutExpired:
+                result["dispatch"]={"status":"timeout_unknown"}
+            # A child report is not enough: only the same durable database
+            # confirmed status (written after exact remote readback) proves
+            # delivery. This also makes unparseable child output recoverable.
+            row=Database(cfg.database,cfg.journal).read(
+                "SELECT status FROM outbox WHERE id=?",(result["outbox_id"],))
+            durable_status=row[0]["status"] if row else "missing"
+            result["sent"]=durable_status=="confirmed"
+            result["outbox_status"]=durable_status
+            result["status"]="confirmed" if result["sent"] else "prepared"
+        print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
+        failed={"authorization_failed","failed","deferred","degraded","partial","blocked","not_found"}
+        return 0 if result.get("status") not in failed and result.get("imported") is not False else 1
     except Busy:
         print(json.dumps({"status":"busy","action":"deferred; no concurrent writer"}))
         return 75

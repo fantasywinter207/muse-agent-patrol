@@ -26,3 +26,9 @@ CLI与有界tick组合。
 
 ## Validation BUG-1 recovery
 Light / Full ticks report malformed collector pages as `degraded` with structured per-source error evidence and unchanged cursor. Unexpected errors escaping collectors result in `failed` (with exception class only, never external exception text) and are recorded in `patrol_runs`, instead of reporting a misleading `partial` when an exception aborted a tick. SQLite `Busy` still propagates to the existing CLI status and exit 75. No live write is enabled.
+
+## Phase 3: separate execution from Muse decisions
+
+`stage --producer-id WORKER --dispatch-now` records an immutable authorized action first, releases `.tick.lock`, then runs a bounded separate `python -m patrol ... outbox-drain --once --id ACTION_ID` process. It does not grant the Muse worker platform authority and never sends an action from Light Tick. The Executor must GET and verify the CrewQuay actor and check target scope, ACK/read preconditions, exact remote readback and existing idempotency. `outbox-drain --once --lane chat|notifications|any --limit 3` is an independent bounded consumer, not another scanning scheduler. A Hook can invoke it periodically for compensation; Full Tick remains a recovery path until its separate responsibilities have a verified replacement.
+
+The old Muse 5-minute Executor Cron must not be disabled simply because this repository contains the CLI. A real authorized stage + dispatch + readback and Hook compensation test are necessary before changing host schedules. This repository never installs or changes host jobs.
