@@ -25,6 +25,9 @@ class Outbox:
         sha=hashlib.sha256(encoded.encode()).hexdigest()
         ident=new_id()
         with self.db.transaction() as c:
+            bound=c.execute("SELECT value FROM meta WHERE key='actor'").fetchone()
+            if bound and actor!=bound[0]:
+                raise ValueError("outbox action actor does not match verified CrewQuay actor; producer is audit-only")
             row=c.execute("SELECT * FROM outbox WHERE logical_key=?",(logical,)).fetchone()
             if row:
                 if (row["actor"],row["action"],row["target"],row["payload_hash"])!=(actor,action,target,sha):
