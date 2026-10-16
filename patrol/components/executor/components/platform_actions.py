@@ -67,9 +67,15 @@ def verify_execution(sender,row):
             detail.get("action")!=command["action"] or
             detail.get("version")!=command["version"] or
             detail.get("resource")!=command["resource"] or
-            detail.get("requestId")!=command["requestId"] or
-            detail.get("requestHash")!=hashlib.sha256(
-                canonical(command).encode("utf-8")).hexdigest()):
+            detail.get("requestId")!=command["requestId"]):
+        return None
+    # The authoritative handler may insert schema defaults. Compare every
+    # caller-supplied key, avoiding cross-language numeric JSON encoding
+    # discrepancies (e.g. 1.0 vs 1) while binding exact request identity.
+    persisted=detail.get("input")
+    if (not isinstance(persisted,dict) or
+            any(k not in persisted or persisted[k]!=v
+                for k,v in command["input"].items())):
         return None
     execution_id=detail.get("executionId")
     if not isinstance(execution_id,str) or not execution_id.startswith("exec_"):
