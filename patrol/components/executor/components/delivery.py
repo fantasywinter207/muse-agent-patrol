@@ -202,7 +202,7 @@ class ActionSender:
         scope={"any":"","chat":" AND action='send'",
                "notifications":" AND action IN ('ack','read')",
                "collaboration":" AND action IN ('project_message','task_thread_reply','room_message')",
-               "tasks":" AND action IN ('task_claim','task_progress','task_submit','submission_review','project_decision')"}[lane]
+               "tasks":" AND action IN ('task_claim','task_progress','task_submit','submission_review','project_decision','artifact_upload')"}[lane]
         params=(now,action_id) if action_id is not None else (now,)
         # Check due work before loading credentials or making an API request.
         due=self.db.read("""SELECT id FROM outbox WHERE
