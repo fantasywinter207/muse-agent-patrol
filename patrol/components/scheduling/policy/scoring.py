@@ -38,6 +38,6 @@ def preemption(running, challenger, now):
         return "urgent_safe_point"
     if other_score>=active_score+12+min(8.0,float(running["switch_cost"])/2):
         return "medium_safe_point"
-    if now>=float(running["slice_until"]) and other_score>=active_score-4:
+    if now>=float(running["slice_until"]) and other_score>=active_score-12:
         return "soft_safe_point"
     return None
