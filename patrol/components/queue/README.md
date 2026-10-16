@@ -20,3 +20,6 @@ persistence.index；公开事务schema。
 
 ## Testing boundary
 通过公开边界使用临时数据库、fake HTTP/WS和真实多进程故障场景核验；不读取真实凭据、不访问业务API。
+
+## Wakeup relationship
+队列里的 `human_action`（包括 blocked）仍然独立于 Wakeup。只有可行动工作及近期待推进的承诺才进入 Wakeup 意图表。重复本地 stage 不等于再次触发 Muse；没有模型宿主回执就不记投递成功。

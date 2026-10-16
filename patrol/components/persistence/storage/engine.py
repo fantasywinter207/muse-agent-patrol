@@ -75,6 +75,15 @@ CREATE TABLE IF NOT EXISTS message_receipts(
  message_created_at REAL,
  fresh_at_receipt INTEGER NOT NULL CHECK(fresh_at_receipt IN (0,1)));
 
+CREATE TABLE IF NOT EXISTS wakeup_requests(
+ id TEXT PRIMARY KEY, logical_key TEXT NOT NULL UNIQUE,
+ source_type TEXT NOT NULL CHECK(source_type IN ('work','promise')),
+ source_id TEXT NOT NULL, priority INTEGER NOT NULL CHECK(priority BETWEEN 0 AND 100),
+ reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+ created_at REAL NOT NULL, next_attempt_at REAL NOT NULL,
+ lease_owner TEXT, lease_version INTEGER NOT NULL DEFAULT 0, lease_until REAL,
+ attempts INTEGER NOT NULL DEFAULT 0, dispatch_evidence TEXT, confirmed_at REAL);
+CREATE INDEX IF NOT EXISTS wakeup_due ON wakeup_requests(status,next_attempt_at,priority);
 CREATE TABLE IF NOT EXISTS promises(
  id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id),
  actor TEXT NOT NULL, recipient TEXT NOT NULL, source_message_id TEXT NOT NULL UNIQUE,

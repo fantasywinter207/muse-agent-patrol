@@ -26,3 +26,12 @@ Windows结果不能替代Linux flock/目录持久性验证。Worker独立结果�
 通过 `tests/test_receipt_priority.py` 验证：当消息首次入库时在 15 分钟内，排队超过 15 分钟后仍然产生 human_action、但不会重开活跃关注窗口；首次入库时已经旧的消息即使被评分 99 也不伪装为新消息；重复 REST 抓取不刷新原始资格；已经存在于旧 v3 SQLite 的消息按第一次 observed_at 修复资格。另验证在 DB actor 已绑定时，即便远端 identity(GET) 立即 BudgetExceeded，仍能先完成本地高分消息 inspector、产生人类待办并返回 deferred 状态，且没有发送远端写请求。没有身份时 inspector 必须 retry_wait。
 
 测试不证明 Muse 自动执行或真实新消息的端到端延迟。上线后请对 Event 202 的 event、receipt、inspect_event 和 human_action 实测记录分别截取真实时间和状态。
+
+## Phase 2 轻量巡检与按需唤醒隔离验收
+
+`tests/test_phase2_light_wakeup.py` 使用无凭据的 SQLite / Fake HTTP 模拟：新消息浅抓取、一次性唤醒去重、blocked 工作需要 Muse 决策但仍未授权写入、租约版本防覆盖、crash unknown 不盲重发、带证据的失败/重试、承诺临近下次动作、无任务时静默、`tick --light --offline` 以及 BudgetExceeded 后保存本地工作和唤醒意图。
+
+注意：`wakeup_requests.status=accepted` 不是远程发消息，也不是业务完成。真实宿主 Hook 能力、定时器部署、消息 60 秒到达目标、长时间积压的恢复速度，都必须经 Owner 授权后在隔离环境另行验收。不可在 CI 中接入正式 CrewQuay 凭据。
+
+## Phase 2 BUG-1: invalid/non-progressing pagination
+`tests/test_phase2_invalid_cursor.py` includes the exact reported regression: initial `messages.received=1`, then `GET messages?after=1` returns `items=[]`, `nextCursor="0"`, `hasMore=false`. Both Light and Full tick must preserve received=1, record an invalid-page error/backoff, continue polling another source (Inbox) and record a truthful `degraded` run. Further tests cover regressive Event Stream cursors and unexpected `ValueError` resulting in persisted `failed` (not `partial`) for both run modes. Isolated Fake REST only; no proof a real service emits such a page.

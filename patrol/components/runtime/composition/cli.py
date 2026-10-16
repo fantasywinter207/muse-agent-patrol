@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import time
 from datetime import datetime
+from dataclasses import replace
 from pathlib import Path
 from ...config.index import load_config
 from ...migration.index import migrate_legacy
@@ -16,6 +17,7 @@ from ...persistence.index import Database, Busy
 from ...promises.index import Promises
 from ...queue.index import Queue, export_pending, MessageScores
 from ...transport.index import Client, credential_provider
+from ...wakeup.index import Wakeups
 from ..process.lock import instance_lock
 from .scheduler import Tick
 
@@ -55,6 +57,7 @@ def parser():
     t.add_argument("--offline",action="store_true")
     t.add_argument("--ws",action="store_true")
     t.add_argument("--quiet",action="store_true")
+    t.add_argument("--light",action="store_true")
     m=sub.add_parser("migrate")
     m.add_argument("directory")
     m.add_argument("--confirm-stopped",action="store_true")
@@ -110,6 +113,22 @@ def parser():
     a.add_argument("--actor",required=True)
     a.add_argument("--reason",required=True)
     a.add_argument("--evidence",required=True)
+    a=sub.add_parser("wakeup-stage")
+    a=sub.add_parser("wakeup-export")
+    a.add_argument("--limit",type=int,default=50)
+    a=sub.add_parser("wakeup-claim")
+    a.add_argument("id")
+    a.add_argument("--owner",required=True)
+    a=sub.add_parser("wakeup-ack")
+    a.add_argument("id")
+    a.add_argument("--owner",required=True)
+    a.add_argument("--lease-version",type=int,required=True)
+    a.add_argument("--result",required=True,choices=("accepted","confirmed_failed","unknown"))
+    a.add_argument("--evidence",required=True)
+    a=sub.add_parser("wakeup-reconcile")
+    a.add_argument("id")
+    a.add_argument("--proven-absent",action="store_true")
+    a.add_argument("--evidence",required=True)
     a=sub.add_parser("work-claim")
     a.add_argument("id")
     a.add_argument("--owner",required=True)
@@ -136,7 +155,7 @@ def main(argv=None):
         cfg=load_config(args.config,database=args.db)
         # File lock is stable across process exits and migrations. Never unlink it.
         with instance_lock(cfg.database+".tick.lock"):
-            if args.command in ("export-pending","work-claim","work-renew","work-finish","score-backfill","score-export","score-message") and not Path(cfg.database).is_file():
+            if args.command in ("export-pending","work-claim","work-renew","work-finish","score-backfill","score-export","score-message","wakeup-stage","wakeup-export","wakeup-claim","wakeup-ack","wakeup-reconcile") and not Path(cfg.database).is_file():
                 raise ValueError("Muse handoff requires an existing initialized database")
             db=Database(cfg.database,cfg.journal)
             now=time.time()
@@ -163,9 +182,19 @@ def main(argv=None):
                     "alert_count":db.read("SELECT count(*) AS count FROM alerts")[0]["count"],
                     "runs":db.read("SELECT id,started_at,ended_at,status FROM patrol_runs ORDER BY started_at DESC LIMIT 5")}
             elif args.command=="tick":
-                client=None if args.offline else Client(cfg,credential_provider(cfg))
-                result=Tick(db,cfg,client).run(websocket=args.ws)
-                if args.quiet and result.get("status")=="ok" and not result.get("alerts") and not result.get("completed_work") and not result.get("outbox_attempts"):
+                if args.light and args.ws:
+                    raise ValueError("light tick must not open a persistent websocket")
+                runtime=cfg
+                if args.light:
+                    runtime=replace(cfg,allow_writes=False,
+                        max_requests=min(cfg.max_requests,cfg.light_max_requests),
+                        max_pages_per_source=min(cfg.max_pages_per_source,cfg.light_max_pages_per_source),
+                        tick_budget_seconds=min(cfg.tick_budget_seconds,cfg.light_tick_budget_seconds),
+                        request_timeout_seconds=min(cfg.request_timeout_seconds,5,
+                            min(cfg.tick_budget_seconds,cfg.light_tick_budget_seconds)-1))
+                client=None if args.offline else Client(runtime,credential_provider(runtime))
+                result=Tick(db,runtime,client).run(websocket=args.ws,light=args.light)
+                if args.quiet and result.get("status")=="ok" and not result.get("alerts") and not result.get("completed_work") and not result.get("outbox_attempts") and not result.get("wakeup_staged"):
                     return 0
             elif args.command=="migrate":
                 result=migrate_legacy(db,args.directory,now,args.confirm_stopped)
@@ -210,6 +239,19 @@ def main(argv=None):
                 result=MessageScores(db).rate(args.event_id,args.score,args.actor,
                                               args.reason,evidence(args.evidence),now)
             
+            elif args.command=="wakeup-stage":
+                result={"staged":Wakeups(db,cfg.lease_seconds).stage(now,threshold=cfg.wakeup_min_score),
+                        "host_called":False}
+            elif args.command=="wakeup-export":
+                result=Wakeups(db,cfg.lease_seconds).export(now,args.limit)
+            elif args.command=="wakeup-claim":
+                result=Wakeups(db,cfg.lease_seconds).claim(args.id,args.owner,now)
+            elif args.command=="wakeup-ack":
+                result=Wakeups(db,cfg.lease_seconds).acknowledge(
+                    args.id,args.owner,args.lease_version,now,args.result,evidence(args.evidence))
+            elif args.command=="wakeup-reconcile":
+                result=Wakeups(db,cfg.lease_seconds).reconcile_unknown(
+                    args.id,now,args.proven_absent,evidence(args.evidence))
             elif args.command=="work-claim":
                 item=Queue(db,cfg.lease_seconds).claim_specific(
                     args.id,args.owner,now,evidence(args.authorization_evidence))

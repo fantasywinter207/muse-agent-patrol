@@ -155,26 +155,39 @@ class Collector:
                 self.sync.failure(source,scope,now,response.retry_after)
                 self.errors.append({"source":source,"status":response.status})
                 return False
-            b=response.body
-            if isinstance(b,list):
-                items=b
-                nxt=after
-                more=False
-                if source=="chats":
-                    self._visible_chats(items,replace=True)
-            elif isinstance(b,dict) and isinstance(b.get("items"),list):
-                items=b["items"]
-                nxt=str(b.get("nextCursor",after))
-                # Inbox/thread pages can omit hasMore: continue to a terminal page.
-                more=bool(b["hasMore"]) if "hasMore" in b else bool(items) and int(nxt)>int(after)
-                if source=="chats":
-                    self._visible_chats(items,replace=after=="0")
-            else:
-                raise ValueError("unrecognized collection response; cursor retained")
-            cursor(nxt)
-            if more and int(nxt)<=int(after):
-                raise ValueError("pagination did not advance")
-            self.sync.page(source,scope,"",items,nxt,now,target="incomplete" if more else None,next_at=now if more else now+interval)
+            # A malformed/retrograde server cursor is a failed source,
+            # NEVER a successful terminal empty page. Preserve every original
+            # event and cursor and give this source a bounded retry backoff;
+            # other due sources are still scanned in the same tick.
+            try:
+                b=response.body
+                if isinstance(b,list):
+                    items=b
+                    nxt=after
+                    more=False
+                elif isinstance(b,dict) and isinstance(b.get("items"),list):
+                    items=b["items"]
+                    nxt=str(b.get("nextCursor",after))
+                    cursor(nxt)
+                    # Inbox/thread pages can omit hasMore: continue to a terminal page.
+                    more=bool(b["hasMore"]) if "hasMore" in b else bool(items) and int(nxt)>int(after)
+                else:
+                    raise ValueError("unrecognized collection response")
+                cursor(nxt)
+                if int(nxt)<int(after) or (more and int(nxt)<=int(after)):
+                    raise ValueError("invalid page cursor: regression or no progress")
+                self.sync.page(source,scope,"",items,nxt,now,
+                               target="incomplete" if more else None,
+                               next_at=now if more else now+interval)
+            except (ValueError,TypeError):
+                # This is an untrusted upstream response, not an invitation to
+                # reset the cursor or mark unseen messages as handled.
+                self.sync.failure(source,scope,now)
+                self.errors.append({"source":source,"scope":scope,
+                                    "code":"INVALID_PAGE_OR_CURSOR"})
+                return False
+            if source=="chats":
+                self._visible_chats(items,replace=after=="0")
             if not more:
                 return True
             after=nxt
@@ -221,12 +234,12 @@ class Collector:
                     self.sync.page("projects",pid+suffix,"",items,"0",now,next_at=now+self.config.normal_scan_seconds)
         return complete
 
-    def events(self, waterline, stream, now):
+    def events(self, waterline, stream, now, force=False):
         waterline=cursor(str(waterline))
         state=self.sync.state("events","global")
         if state["stream"]!=stream or int(state["received"])>int(waterline):
             return "resync"
-        if state["next_at"]>now:
+        if state["next_at"]>now and (not force or state["failures"]):
             return "backoff"
         target=state["target"] or waterline
         after=state["received"]
@@ -241,16 +254,26 @@ class Collector:
                 self.sync.failure("events","global",now,r.retry_after)
                 self.errors.append({"source":"events","status":r.status})
                 return "failed"
-            b=r.body
-            if not isinstance(b,dict) or not isinstance(b.get("items"),list):
-                raise ValueError("invalid event page")
-            nxt=str(b.get("nextCursor",target if not b.get("hasMore") else after))
-            cursor(nxt)
-            if int(nxt)>int(target) or (b.get("hasMore") and int(nxt)<=int(after)):
-                raise ValueError("invalid event coverage")
-            done=not b.get("hasMore")
-            self.sync.page("events","global",stream,b["items"],target if done else nxt,now,target=None if done else target,
-                           next_at=now+self.config.normal_scan_seconds if done else now)
+            try:
+                b=r.body
+                if not isinstance(b,dict) or not isinstance(b.get("items"),list):
+                    raise ValueError("invalid event page")
+                nxt=str(b.get("nextCursor",target if not b.get("hasMore") else after))
+                cursor(nxt)
+                more=bool(b.get("hasMore"))
+                if (int(nxt)<int(after) or int(nxt)>int(target)
+                        or (more and int(nxt)<=int(after))):
+                    raise ValueError("invalid event cursor progression")
+                done=not more
+                self.sync.page("events","global",stream,b["items"],
+                               target if done else nxt,now,
+                               target=None if done else target,
+                               next_at=now+self.config.normal_scan_seconds if done else now)
+            except (ValueError,TypeError):
+                self.sync.failure("events","global",now)
+                self.errors.append({"source":"events","scope":"global",
+                                    "code":"INVALID_EVENT_PAGE_OR_CURSOR"})
+                return "failed"
             if done:
                 return "complete"
             after=nxt

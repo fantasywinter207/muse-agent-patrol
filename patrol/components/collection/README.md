@@ -20,3 +20,6 @@ persistence.index、queue.index、transport.index。
 
 ## Testing boundary
 通过公开边界使用临时数据库、fake HTTP/WS和真实多进程故障场景核验；不读取真实凭据、不访问业务API。
+
+## Invalid pagination responses
+When an upstream REST page returns a malformed, regressive, or non-advancing cursor while `hasMore` is true, `Collector.pages` treats the page as a failed source, preserves the previous received cursor, records `INVALID_PAGE_OR_CURSOR` and applies persisted retry backoff. A regressive empty page must **not** be coerced into a successful terminal page. The collector continues other independent sources. The equivalent event-stream guard records `INVALID_EVENT_PAGE_OR_CURSOR`. This is defense against bad upstream responses; the real endpoint exhibiting this behavior has not been verified.
