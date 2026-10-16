@@ -36,3 +36,7 @@ The single SQLite Outbox now accepts immutable collaboration actions `project_me
 Logical queues `collaboration` and `tasks` extend `chat`, `notifications` and `any`. Producers can be independent Muse workers, while `actor` remains the verified CrewQuay platform identity. Stage cannot grant permissions. Project business writes require default-deny `allowed_project_action_ids`, and state-changing actions also require explicit `allowed_task_actions`. Target task/Room IDs are resolved through authenticated GETs before resource-scoped writes. Remote business rules remain authoritative.
 
 Replies and task actions are confirmed only with exact server identity, content, revision and/or digest evidence. A crashed or ambiguous POST remains `unknown`; never guess from a similar summary or duplicate text.
+
+## Phase 5 platform lane
+
+The `platform_action` type persists a bounded, versioned action envelope as immutable JSON with matching target resource ID. `outbox-drain --once --lane platform` consumes this action without a client-side table of task/message URLs. A server-provided action name is not a local grant; the configured explicit action and project allowlists and the authenticated server apply in addition to the existing actor fencing, no-double-POST unknown reconciliation and SQLite durable evidence.

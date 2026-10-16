@@ -55,6 +55,10 @@ def parser():
     sub.add_parser("init")
     sub.add_parser("doctor")
     sub.add_parser("status")
+    sub.add_parser("platform-catalog")
+    a=sub.add_parser("platform-events")
+    a.add_argument("--after",default="0")
+    a.add_argument("--limit",type=int,default=50)
     t=sub.add_parser("tick")
     t.add_argument("--offline",action="store_true")
     t.add_argument("--ws",action="store_true")
@@ -67,7 +71,7 @@ def parser():
     b.add_argument("destination")
     a=sub.add_parser("stage")
     a.add_argument("action",choices=("send","ack","read","project_message","task_thread_reply","room_message",
-                                     "task_claim","task_progress","task_submit","submission_review","project_decision","artifact_upload"))
+                                     "task_claim","task_progress","task_submit","submission_review","project_decision","artifact_upload","platform_action"))
     a.add_argument("--logical-key",required=True)
     # --actor is the authenticated CREWQUAY principal, not the Muse worker.
     # Omit it to derive the actor from the previously verified DB binding.
@@ -80,7 +84,7 @@ def parser():
     a=sub.add_parser("outbox-drain")
     a.add_argument("--once",action="store_true",required=True)
     a.add_argument("--limit",type=int,default=3)
-    a.add_argument("--lane",choices=("any","chat","notifications","collaboration","tasks"),default="any")
+    a.add_argument("--lane",choices=("any","chat","notifications","collaboration","tasks","platform"),default="any")
     a.add_argument("--id")
     r=sub.add_parser("resolve")
     r.add_argument("id")
@@ -213,6 +217,18 @@ def main(argv=None):
                 result=migrate_legacy(db,args.directory,now,args.confirm_stopped)
             elif args.command=="backup":
                 result={"backup":db.backup(args.destination),"integrity":"ok"}
+            elif args.command=="platform-catalog":
+                client=Client(cfg,credential_provider(cfg))
+                remote=client.request("GET","/api/v1/agent/actions")
+                result={"status":"ok","catalog":remote.body} if remote.status==200 else {"status":"failed","remote_status":remote.status}
+            elif args.command=="platform-events":
+                from urllib.parse import urlencode
+                if not args.after.isdecimal() or not 1<=args.limit<=100:
+                    raise ValueError("invalid cursor or page limit")
+                client=Client(cfg,credential_provider(cfg))
+                remote=client.request("GET","/api/v1/agent/events?"+
+                    urlencode({"after":args.after,"limit":args.limit}))
+                result={"status":"ok","page":remote.body} if remote.status==200 else {"status":"failed","remote_status":remote.status}
             elif args.command=="stage":
                 with open(args.payload_file,encoding="utf-8") as f:
                     payload=json.load(f)

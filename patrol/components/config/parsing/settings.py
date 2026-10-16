@@ -37,6 +37,7 @@ class Config:
     project_ids: list = field(default_factory=list)
     allowed_project_action_ids: list = field(default_factory=list)
     allowed_task_actions: list = field(default_factory=list)
+    allowed_platform_actions: list = field(default_factory=list)
     ack_single_enabled: bool = False
     ack_chat_map: dict = field(default_factory=dict)
 
@@ -60,7 +61,7 @@ class Config:
             raise ValueError("request timeout must be below tick budget")
         if self.lease_seconds <= self.tick_budget_seconds:
             raise ValueError("lease must exceed tick budget")
-        for name in ("allowed_chat_ids", "project_ids", "allowed_project_action_ids", "allowed_task_actions"):
+        for name in ("allowed_chat_ids", "project_ids", "allowed_project_action_ids", "allowed_task_actions", "allowed_platform_actions"):
             value = getattr(self, name)
             if not isinstance(value, list) or any(not isinstance(v, str) or not v for v in value):
                 raise ValueError("invalid scope list: " + name)

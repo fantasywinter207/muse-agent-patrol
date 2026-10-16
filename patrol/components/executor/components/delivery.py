@@ -14,6 +14,7 @@ from ...persistence.index import canonical
 from ...outbox.index import Outbox
 from ...transport.index import AuthError
 from .task_actions import TASK_ACTIONS, task_scope, task_path, task_payload, verify_task
+from .platform_actions import can_execute, verify_execution
 
 
 class ActionSender:
@@ -51,6 +52,8 @@ class ActionSender:
                 project_id=scope.body.get("projectId")
             if project_id not in self.config.allowed_project_action_ids:
                 return False,"project not in authorized action scope"
+        if row["action"]=="platform_action":
+            return can_execute(self,row)
         if row["action"] in TASK_ACTIONS:
             return task_scope(self,row)
         if row["action"]=="read":
@@ -85,6 +88,8 @@ class ActionSender:
             path="/api/v1/tasks/"+quote(row["target"],safe="")+"/thread/messages"
         elif row["action"]=="room_message":
             path="/api/v1/rooms/"+quote(row["target"],safe="")+"/messages"
+        elif row["action"]=="platform_action":
+            path="/api/v1/agent/actions/execute"
         elif row["action"] in TASK_ACTIONS:
             path=task_path(row)
         else:
@@ -144,6 +149,8 @@ class ActionSender:
                     break
                 after=nxt
             return None
+        if row["action"]=="platform_action":
+            return verify_execution(self,row)
         if row["action"] in TASK_ACTIONS:
             return verify_task(self,row,response)
         # Unknown operations without a stable remote id cannot safely be guessed from matching text.
@@ -188,7 +195,7 @@ class ActionSender:
             raise ValueError("limit must be between 1 and 50")
         if action_id is not None and (not isinstance(action_id,str) or not action_id):
             raise ValueError("nonempty Outbox ID required")
-        if lane not in ("any","chat","notifications","collaboration","tasks"):
+        if lane not in ("any","chat","notifications","collaboration","tasks","platform"):
             raise ValueError("unsupported action lane")
         now=self.clock()
         report={"mode":"outbox_once","status":"idle","outbox_attempts":[],
@@ -202,7 +209,8 @@ class ActionSender:
         scope={"any":"","chat":" AND action='send'",
                "notifications":" AND action IN ('ack','read')",
                "collaboration":" AND action IN ('project_message','task_thread_reply','room_message')",
-               "tasks":" AND action IN ('task_claim','task_progress','task_submit','submission_review','project_decision','artifact_upload')"}[lane]
+               "tasks":" AND action IN ('task_claim','task_progress','task_submit','submission_review','project_decision','artifact_upload')",
+               "platform":" AND action='platform_action'"}[lane]
         params=(now,action_id) if action_id is not None else (now,)
         # Check due work before loading credentials or making an API request.
         due=self.db.read("""SELECT id FROM outbox WHERE

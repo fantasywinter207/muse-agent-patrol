@@ -48,3 +48,7 @@ A live test is still necessary for actual throughput and host permissions: (1) k
 ## Phase 4: project collaboration and task action adapters
 
 `tests/test_phase4_collaboration.py` and `tests/test_phase4_task_actions.py` exercise exact project discussion, task-thread, Room and task/decision/artifact REST routes with ephemeral SQLite and Fake HTTP. Assertions cover default-deny project write scope, wrong task resource mapping, per-action mutation opt-in, stable outbox idempotency/remote ID, one POST only, exact readback, and unknown-outcome isolation. These tests do not issue any production API call or prove a deployed platform has matching routes; check the server's live OpenAPI and actual role grants separately.
+
+## Phase 5 generic Agent protocol
+
+`test_phase5_platform_protocol.py` uses fake authenticated platform catalog/resource/receipt APIs and temporary SQLite. It tests new dynamic action names without new routing code, deny-by-default project and action permissions, duplicate trigger suppression, exact request digest, and crash-ambiguous POST recovery using `requestId` without a second POST. No production API calls occur in CI.
