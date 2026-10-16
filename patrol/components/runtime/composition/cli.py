@@ -328,9 +328,14 @@ def main(argv=None):
                     result["dispatch"]={"status":"unparsed","exit_code":done.returncode}
             except subprocess.TimeoutExpired:
                 result["dispatch"]={"status":"timeout_unknown"}
-            # A failed immediate attempt is left in the durable Outbox for
-            # scheduled compensation; it must NEVER be reported as sent.
-            result["sent"]=result["dispatch"].get("item_status")=="confirmed"
+            # A child report is not enough: only the same durable database
+            # confirmed status (written after exact remote readback) proves
+            # delivery. This also makes unparseable child output recoverable.
+            row=Database(cfg.database,cfg.journal).read(
+                "SELECT status FROM outbox WHERE id=?",(result["outbox_id"],))
+            durable_status=row[0]["status"] if row else "missing"
+            result["sent"]=durable_status=="confirmed"
+            result["outbox_status"]=durable_status
             result["status"]="confirmed" if result["sent"] else "prepared"
         print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
         failed={"authorization_failed","failed","deferred","degraded","partial","blocked","not_found"}
