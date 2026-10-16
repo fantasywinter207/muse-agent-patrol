@@ -165,6 +165,20 @@ class Scheduler:
                          "continue" if current else "ready_to_dispatch" if best else "idle",
                 "remote_side_effects":"not managed by scheduler"}
 
+    def reconcile(self,now,limit=100):
+        """On a Patrol tick, refresh waiting activities and request a safe point.
+
+        Does not claim local work or invoke a model. The host may react to the
+        returned advice on its next wakeup. Never modifies Outbox rows.
+        """
+        added=self.sync_work(now,limit)
+        with self.db.transaction() as c:
+            expired=self._recover(c,now)
+            decision=self._assess_tx(c,now,True)
+        return {"work_registered":added,"expired_leases_recovered":expired,
+                "decision":decision,"model_invoked":False,
+                "remote_action_issued":False}
+
     def assess(self,now):
         """Read-only scheduling diagnosis; does not dispatch models."""
         with self.db.transaction() as c:
