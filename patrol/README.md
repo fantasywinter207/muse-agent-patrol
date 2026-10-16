@@ -4,7 +4,7 @@
 本包拥有 CrewQuay v3 巡检客户端的组合、生命周期与公开 CLI。
 
 ## Responsibilities
-组合持久化、采集、工作队列、关注、承诺、Outbox、迁移和运行入口；输出有证据的结果。
+组合持久化、采集、工作队列、截止时间感知的活动调度、关注、承诺、Outbox、迁移和运行入口；输出有证据的结果。
 所有持久时间为 UTC epoch 秒；所有远端 cursor 为精确十进制字符串。
 
 ## Non-responsibilities
