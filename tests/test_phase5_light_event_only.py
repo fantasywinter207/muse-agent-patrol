@@ -142,7 +142,7 @@ class EventOnlyLightTests(unittest.TestCase):
     def test_changed_stream_never_resets_checkpoint(self):
         self.tick([Response(200,page([event()]))])
         a,_=self.tick([Response(200,page([],to="1",stream="unexpected"))],now=1060)
-        self.assertIn("agent_events:failed",a["incomplete_sources"])
+        self.assertIn("agent_events:resync_required",a["incomplete_sources"])
         self.assertEqual(self.db.read("SELECT received FROM sync_cursors WHERE source='agent_events'")[0]["received"],"1")
 
 
