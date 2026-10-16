@@ -230,6 +230,8 @@ class Scheduler:
         with self.db.transaction() as c:
             row=self._owned(c,ident,owner,generation,now)
             self._charge(c,row,now)
+            row=dict(c.execute("SELECT * FROM schedule_activities WHERE id=?",
+                               (ident,)).fetchone())
             contenders=self._best(self._ready(c),now)
             mode=preemption(row,contenders,now)
             suspended=bool(voluntary or row["preempt_requested"] or mode)
