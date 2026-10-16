@@ -35,7 +35,14 @@ class Sync:
         with self.db.transaction() as c:
             old=c.execute("SELECT * FROM sync_cursors WHERE source=? AND scope=?",(source,scope)).fetchone()
             if old and old["stream"]!=stream:
-                raise ValueError("stream reset requires a successful resource resync")
+                # A failed first request may have persisted only retry metadata.
+                # No stream or cursor has been committed in that case, so the
+                # first valid Agent feed page may establish its stream safely.
+                uninitialized_agent_feed=(source=="agent_events" and
+                    old["stream"]=="" and old["received"]=="0" and
+                    old["handled"]=="0" and old["target"] is None)
+                if not uninitialized_agent_feed:
+                    raise ValueError("stream reset requires a successful resource resync")
             if old and int(next_cursor)<int(old["received"]):
                 raise ValueError("stale page cannot regress cursor")
             for item in items:
@@ -68,7 +75,9 @@ class Sync:
                     # A normalized message accompanies a server-visible event.
                     # Persist its first receipt, baseline, and inspector within
                     # the same cursor-advance transaction: no crash gap.
-                    msg=item.get("message")
+                    # A replay with the same event ID must never replace the
+                    # first authorized message snapshot or create a new one.
+                    msg=json.loads(row["payload"]).get("message")
                     if isinstance(msg,dict):
                         kind=msg.get("scopeType")
                         scope_id=msg.get("scopeId")
@@ -106,7 +115,7 @@ class Sync:
                            now,event_id=row[0],start_by=now+180,priority=score)
             c.execute("""INSERT INTO sync_cursors(source,scope,stream,received,target,next_at)
                 VALUES(?,?,?,?,?,?) ON CONFLICT(source,scope) DO UPDATE SET received=excluded.received,
-                target=excluded.target,next_at=excluded.next_at,failures=0""",
+                stream=excluded.stream,target=excluded.target,next_at=excluded.next_at,failures=0""",
                 (source,scope,stream,next_cursor,target,now if next_at is None else next_at))
             if target is None:
                 c.execute("UPDATE sync_cursors SET covered_at=? WHERE source=? AND scope=?",(now,source,scope))
