@@ -254,16 +254,26 @@ class Collector:
                 self.sync.failure("events","global",now,r.retry_after)
                 self.errors.append({"source":"events","status":r.status})
                 return "failed"
-            b=r.body
-            if not isinstance(b,dict) or not isinstance(b.get("items"),list):
-                raise ValueError("invalid event page")
-            nxt=str(b.get("nextCursor",target if not b.get("hasMore") else after))
-            cursor(nxt)
-            if int(nxt)>int(target) or (b.get("hasMore") and int(nxt)<=int(after)):
-                raise ValueError("invalid event coverage")
-            done=not b.get("hasMore")
-            self.sync.page("events","global",stream,b["items"],target if done else nxt,now,target=None if done else target,
-                           next_at=now+self.config.normal_scan_seconds if done else now)
+            try:
+                b=r.body
+                if not isinstance(b,dict) or not isinstance(b.get("items"),list):
+                    raise ValueError("invalid event page")
+                nxt=str(b.get("nextCursor",target if not b.get("hasMore") else after))
+                cursor(nxt)
+                more=bool(b.get("hasMore"))
+                if (int(nxt)<int(after) or int(nxt)>int(target)
+                        or (more and int(nxt)<=int(after))):
+                    raise ValueError("invalid event cursor progression")
+                done=not more
+                self.sync.page("events","global",stream,b["items"],
+                               target if done else nxt,now,
+                               target=None if done else target,
+                               next_at=now+self.config.normal_scan_seconds if done else now)
+            except (ValueError,TypeError):
+                self.sync.failure("events","global",now)
+                self.errors.append({"source":"events","scope":"global",
+                                    "code":"INVALID_EVENT_PAGE_OR_CURSOR"})
+                return "failed"
             if done:
                 return "complete"
             after=nxt
