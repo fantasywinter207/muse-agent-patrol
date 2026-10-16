@@ -96,6 +96,9 @@ class ActionSender:
         if row["action"]=="send" and row["target"] not in self.config.allowed_chat_ids:
             return None
         if row["action"] in ("project_message","task_thread_reply","room_message"):
+            allowed,_=self.can_send(row)
+            if not allowed:
+                return None
             # Remote response alone is not proof: verify the exact message
             # identity and content in the corresponding authorized resource.
             if response is None and row.get("remote_id"):
