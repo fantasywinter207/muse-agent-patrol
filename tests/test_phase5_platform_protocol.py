@@ -47,7 +47,7 @@ class ProtocolAPI:
                     "version":"1","resource":payload["resource"],
                     "requestId":request_id,"status":"confirmed",
                     "requestHash":hashlib.sha256(canonical(payload).encode()).hexdigest(),
-                    "result":{"id":"msg1"}}
+                    "input":payload["input"],"result":{"id":"msg1"}}
             self.committed[request_id]=result
             return Response(200,result)
         if method=="GET" and path.startswith("/api/v1/agent/executions/by-request/"):
