@@ -4,17 +4,18 @@ No arbitrary endpoint/HTTP-method execution. Verified evidence must identify
 the exact resulting task revision, submission, review or formal decision.
 """
 import hashlib
+import base64
 from urllib.parse import quote
 from ...persistence.index import canonical
 
 TASK_ACTIONS=frozenset(("task_claim","task_progress","task_submit",
-                        "submission_review","project_decision"))
+                        "submission_review","project_decision","artifact_upload"))
 
 def task_scope(sender,row):
     action=row["action"]
     if action not in sender.config.allowed_task_actions:
         return False,"action not explicitly approved in allowed_task_actions"
-    if action=="project_decision":
+    if action in ("project_decision","artifact_upload"):
         project_id=row["target"]
     else:
         task_id=row["payload"]["taskId"] if action=="submission_review" else row["target"]
@@ -45,6 +46,8 @@ def task_path(row):
     target=quote(row["target"],safe="")
     if action=="project_decision":
         return "/api/v1/projects/"+target+"/decisions"
+    if action=="artifact_upload":
+        return "/api/v1/projects/"+target+"/artifacts"
     if action=="submission_review":
         return "/api/v1/submissions/"+target+"/reviews"
     suffix={"task_claim":"/claim","task_progress":"/progress",
@@ -84,6 +87,21 @@ def verify_task(sender,row,response):
             return None
         return {"id":row["target"],"source":"REST exact task version",
                 "sha256":hashlib.sha256(canonical(t).encode()).hexdigest()}
+    if action=="artifact_upload":
+        if not remote:
+            return None
+        r=sender.client.request("GET","/api/v1/artifacts/"+
+                                quote(remote,safe="")+"/metadata")
+        if r.status!=200 or not isinstance(r.body,dict):
+            return None
+        actual=r.body
+        content_hash=hashlib.sha256(base64.b64decode(payload["contentBase64"])).hexdigest()
+        if (actual.get("id")!=remote or actual.get("projectId")!=row["target"]
+                or actual.get("actorId")!=row["actor"]
+                or actual.get("sha256")!=content_hash):
+            return None
+        return {"id":remote,"source":"REST artifact SHA-256 metadata readback",
+                "sha256":content_hash}
     if action=="project_decision":
         if not remote:
             return None
