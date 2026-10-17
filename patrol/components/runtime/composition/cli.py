@@ -207,6 +207,8 @@ def parser():
     sub.add_parser("schedule-assess")
     a=sub.add_parser("schedule-next")
     a.add_argument("--owner",required=True)
+    a.add_argument("--for-work-id",
+        help="diagnose and dispatch this specific eligible work only if it is highest ranked; never bypass a live lease")
     a=sub.add_parser("schedule-checkpoint")
     a.add_argument("id")
     a.add_argument("--owner",required=True)
@@ -347,7 +349,8 @@ def main(argv=None):
             elif args.command=="schedule-assess":
                 result=Scheduler(db,cfg.lease_seconds).assess(now)
             elif args.command=="schedule-next":
-                result=Scheduler(db,cfg.lease_seconds).dispatch(args.owner,now)
+                result=Scheduler(db,cfg.lease_seconds).dispatch(
+                    args.owner,now,for_work_id=args.for_work_id)
             elif args.command=="schedule-checkpoint":
                 result=Scheduler(db,cfg.lease_seconds).checkpoint(
                     args.id,args.owner,args.generation,now,evidence(args.state_file),
