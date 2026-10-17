@@ -6,6 +6,7 @@ Remote side effects live in Outbox and must be reconciled independently.
 import json
 import math
 from .scoring import priority, quantum, preemption
+from .checkpoint import validate as validate_checkpoint
 from ...persistence.index import canonical, new_id, StaleLease
 
 KINDS=frozenset(("work","promise","social","research","maintenance"))
@@ -264,6 +265,7 @@ class Scheduler:
         if (not isinstance(data,dict) or not data or
                 len(canonical(data).encode("utf-8"))>32768):
             raise ValueError("nonempty checkpoint <=32KiB required")
+        validate_checkpoint(data)
         with self.db.transaction() as c:
             row=self._owned(c,ident,owner,generation,now)
             self._charge(c,row,now)
@@ -314,6 +316,46 @@ class Scheduler:
             return {"suspended":suspended,"activity":self._public(new,now),
                     "next_step":"dispatch_again" if suspended else "continue",
                     "warning":"previously staged remote effects remain in Outbox"}
+
+    def restore(self,ident,now):
+        """Read-only restoration pack; caller must independently obtain a lease.
+
+        Checkpoint text is untrusted context, never instructions or permission.
+        Remote resource references must be re-read with current authorization.
+        Existing Outbox IDs are inspected but never resent here.
+        """
+        if not isinstance(ident,str) or not ident or len(ident)>128:
+            raise ValueError("bounded schedule activity ID required")
+        rows=self.db.read("SELECT * FROM schedule_activities WHERE id=?",(ident,))
+        if not rows:
+            raise ValueError("unknown schedule activity")
+        row=rows[0]
+        data=json.loads(row["checkpoint"]) if row["checkpoint"] else None
+        fmt=validate_checkpoint(data) if data is not None else "none"
+        pending=data.get("pending_outbox_ids",[]) if fmt=="v1" else []
+        results=[]
+        for outbox_id in pending:
+            lookup=self.db.read("SELECT status,remote_id FROM outbox WHERE id=?",
+                                (outbox_id,))
+            results.append({"id":outbox_id,"status":lookup[0]["status"] if lookup else "missing",
+                            "remote_id":lookup[0]["remote_id"] if lookup else None})
+        work=None
+        if row["work_id"]:
+            w=self.db.read("SELECT status,next_action_at,lease_version FROM work_items WHERE id=?",
+                           (row["work_id"],))
+            work=w[0] if w else {"status":"missing"}
+        return {"activity_id":ident,"kind":row["kind"],"status":row["status"],
+                "checkpoint_format":fmt,"checkpoint":data,
+                "outbox_receipts":results,"work":work,
+                "scheduler_generation":row["lease_version"],
+                "next_step":"obtain_new_schedule_next_lease" if row["status"] in ACTIVE else
+                            "inspect_current_running_lease" if row["status"]=="running" else
+                            "terminal_do_not_resume",
+                "requires_remote_resource_revalidation":True,
+                "requires_outbox_reconciliation":any(
+                    v["status"] not in ("confirmed","resolved") for v in results),
+                "model_state_restored":False,
+                "side_effects_executed":False}
 
     def complete(self,ident,owner,generation,now,evidence):
         if not isinstance(evidence,dict) or not evidence:
