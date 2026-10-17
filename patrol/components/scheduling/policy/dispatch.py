@@ -210,27 +210,49 @@ class Scheduler:
         return elapsed
 
     def _recover(self,c,now):
+        """Fence only truly expired leases; never revoke an active worker.
+
+        The historical active-Scheduler recovery is augmented by an orphan
+        scan: a ready/suspended Scheduler activity cannot run while its
+        associated Queue work is left 'running' by an older crashed handoff.
+        Reclaim that Queue lease only after its own expiry, within the same
+        transaction as subsequent scheduling. Outbox side effects are not
+        modified or replayed.
+        """
+        recovered=0
         active=self._current(c)
-        if not active or active["lease_until"]>now:
-            return 0
-        self._charge(c,active,now)
-        # Scheduler and local work are separate leases. A crashed Scheduler
-        # must fence the matching Queue lease as well, otherwise a resumed
-        # activity can remain unclaimable until a later Queue tick.
-        if active["work_id"]:
+        if active and active["lease_until"]<=now:
+            self._charge(c,active,now)
+            # A crashed Scheduler fences its matching Queue lease, even
+            # when the Queue lease nominally expires a little later.
+            if active["work_id"]:
+                c.execute("""UPDATE work_items SET status='pending',
+                    lease_owner=NULL,lease_until=NULL,
+                    lease_version=lease_version+1,next_action_at=?,
+                    block_reason='scheduler lease expired; reconcile Outbox'
+                    WHERE id=? AND status='running' AND lease_owner=?""",
+                    (now,active["work_id"],active["lease_owner"]))
+            c.execute("""UPDATE schedule_activities SET status='suspended',
+                lease_owner=NULL,lease_until=NULL,slice_until=NULL,
+                lease_version=lease_version+1,ready_since=?,last_updated=?,
+                preempt_requested=0,preempt_mode=NULL,
+                preempt_reason='expired lease; reconcile Outbox before new effects'
+                WHERE id=? AND status='running'""",(now,now,active["id"]))
+            recovered+=1
+        orphans=c.execute("""SELECT w.id FROM work_items w
+            JOIN schedule_activities a ON a.work_id=w.id
+            WHERE a.status IN ('ready','suspended')
+              AND w.status='running' AND w.lease_until<=?""",
+            (now,)).fetchall()
+        for orphan in orphans:
             c.execute("""UPDATE work_items SET status='pending',
                 lease_owner=NULL,lease_until=NULL,
                 lease_version=lease_version+1,next_action_at=?,
-                block_reason='scheduler lease expired; reconcile Outbox'
-                WHERE id=? AND status='running' AND lease_owner=?""",
-                (now,active["work_id"],active["lease_owner"]))
-        c.execute("""UPDATE schedule_activities SET status='suspended',
-            lease_owner=NULL,lease_until=NULL,slice_until=NULL,
-            lease_version=lease_version+1,ready_since=?,last_updated=?,
-            preempt_requested=0,preempt_mode=NULL,
-            preempt_reason='expired lease; reconcile Outbox before new effects'
-            WHERE id=? AND status='running'""",(now,now,active["id"]))
-        return 1
+                block_reason='orphaned expired Queue lease; reconcile Outbox'
+                WHERE id=? AND status='running' AND lease_until<=?""",
+                (now,orphan["id"],now))
+        recovered+=len(orphans)
+        return recovered
 
     def _assess_tx(self,c,now,mutate):
         current=self._current(c)
