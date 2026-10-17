@@ -374,3 +374,36 @@ class Wakeups:
                     ON CONFLICT(logical_key) DO NOTHING""",
                     (key,kind,canonical(detail),now)).rowcount
         return counts
+
+
+    def reconcile_accepted_no_start(self, ident, now, proven_not_started, evidence):
+        """Operator/host-authenticated absence proof permits a controlled retry.
+
+        An accepted wake cannot be assumed absent from missing heartbeat alone.
+        Never downgrade a wake that has any worker execution receipt.
+        """
+        if (proven_not_started is not True or not isinstance(evidence,dict)
+                or not evidence or len(canonical(evidence).encode("utf-8"))>4096):
+            raise ValueError("explicit bounded non-execution proof is required")
+        with self.db.transaction() as c:
+            wake=c.execute("SELECT * FROM wakeup_requests WHERE id=?",
+                           (ident,)).fetchone()
+            if not wake or wake["status"]!="accepted":
+                raise StaleLease("only an accepted wake may be reconciled")
+            if c.execute("SELECT 1 FROM wakeup_execution_receipts WHERE wakeup_id=?",
+                         (ident,)).fetchone():
+                raise StaleLease("worker execution already observed; cannot retry host wake")
+            if not self._source_alive(c,wake):
+                raise StaleLease("source no longer needs a host wake")
+            # Preserve original delivery evidence. Append the independent
+            # non-execution proof instead of overwriting the host receipt.
+            c.execute("""INSERT INTO alerts(logical_key,kind,detail,created_at)
+                VALUES(?,?,?,?)""",
+                ("wakeup_reconcile_accepted:"+ident+":"+str(wake["lease_version"]),
+                 "accepted_no_start_reconciled",
+                 canonical({"wakeup_id":ident,"generation":wake["lease_version"],
+                            "absence_proof":evidence}),now))
+            c.execute("""UPDATE wakeup_requests SET status='retry_wait',
+                next_attempt_at=? WHERE id=? AND status='accepted'""",(now,ident))
+        return {"id":ident,"status":"retry_wait","host_called":False,
+                "original_host_acceptance_preserved":True}
