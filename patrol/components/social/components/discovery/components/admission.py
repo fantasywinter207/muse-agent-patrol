@@ -38,6 +38,16 @@ class SocialOpportunities:
                 type(interval) is not int or interval<900):
             raise ValueError("invalid idle discovery window")
         with self.db.transaction() as c:
+            # Work can have been enqueued just before Scheduler.sync_work
+            # or Wakeups.stage. Never mistake that race for an idle window.
+            if c.execute("""SELECT 1 FROM work_items
+                WHERE type='human_action' AND status IN ('pending','retry_wait')
+                  AND next_action_at<=? LIMIT 1""",(now,)).fetchone():
+                return False
+            if c.execute("""SELECT 1 FROM promises
+                WHERE status!='done' AND next_action_at<=? LIMIT 1""",
+                (now,)).fetchone():
+                return False
             if c.execute("""SELECT 1 FROM wakeup_requests
                 WHERE source_type IN ('work','promise')
                   AND status IN ('pending','retry_wait','leased','unknown')
