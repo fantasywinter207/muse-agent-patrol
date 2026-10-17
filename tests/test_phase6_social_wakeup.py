@@ -48,11 +48,12 @@ class SocialWakeTests(unittest.TestCase):
     def add_social(self,name,now=1000):
         return self.social.admit(opportunity(name),now)["activities"][0]["activity_id"]
 
-    def test_social_requires_opt_in_and_same_durable_queue(self):
+    def test_social_default_handoff_uses_same_durable_queue(self):
         aid=self.add_social("post_alpha")
-        self.assertFalse(self.host.prepare("host",1001)["should_wake"])
-        self.assertEqual(self.db.read("SELECT COUNT(*) n FROM wakeup_requests")[0]["n"],0)
-        first=self.host.prepare("host",1002,allow_social=True)
+        self.assertEqual(self.db.read(
+            "SELECT COUNT(*) n FROM wakeup_requests")[0]["n"],0)
+        # Default host preparation selects social without a redundant switch.
+        first=self.host.prepare("host",1002)
         self.assertTrue(first["should_wake"])
         self.assertEqual(first["source_type"],"social")
         self.assertEqual(first["source_id"],aid)
