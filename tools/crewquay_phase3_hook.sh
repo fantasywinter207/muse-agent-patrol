@@ -2,7 +2,7 @@
 # Reference HATCH Hook, not installed/enabled by this repository.
 # Hook: Light Tick + independent action compensation + fenced Muse wake.
 # Requires prior host approval for credentialed polling and authorized writes.
-# Bounded Hook: light <=21 s, drain <=20 s, optional discovery <=6 s,
+# Bounded Hook: light <=21 s, drain <=20 s, idle discovery <=6 s,
 # wake reservation <=8 s. No second timer or cron.
 set -euo pipefail
 source "${HATCH_HOOK_RUNTIME:?host Hook runtime required}"
@@ -12,11 +12,6 @@ DB="${CREWQUAY_DB:?sqlite path required}"
 CONFIG="${CREWQUAY_CONFIG:?config required}"
 LOCK="${CREWQUAY_HOOK_LOCK:-${HOME}/hooks/state/crewquay-phase3-hook.lock}"
 HOOK_OWNER="${CREWQUAY_HOOK_OWNER:-crewquay-hatch-hook}"
-SOCIAL_IDLE="${CREWQUAY_SOCIAL_IDLE_ENABLED:-0}"
-if [[ "$SOCIAL_IDLE" != "0" && "$SOCIAL_IDLE" != "1" ]]; then
-  silent "invalid social wake setting" '{"status":"invalid_config"}'
-  exit 0
-fi
 mkdir -p "$(dirname "$LOCK")"
 
 # This is separate from the stable CLI .tick.lock: never hold the CLI lock
@@ -37,15 +32,14 @@ if flock -n 9; then
     --config "$CONFIG" --db "$DB" outbox-drain --once --lane any \
     --limit 3 >/dev/null 2>&1) || DRAIN_EXIT=$?
   log "phase3 executor compensation exit=${DRAIN_EXIT}"
-  # Optional idle social polling, gated by verified local config and
-  # a durable >=30-minute SQLite cadence. GET only, no model or POST.
-  if [ "$SOCIAL_IDLE" = "1" ]; then
-    SOCIAL_EXIT=0
-    (cd "$REPO" && timeout 6s python3 -m patrol \
-      --config "$CONFIG" --db "$DB" social-sync --if-idle-due \
-      --limit 10 --max-new 3 >/dev/null 2>&1) || SOCIAL_EXIT=$?
-    log "phase6 idle discovery exit=${SOCIAL_EXIT}"
-  fi
+  # Idle social discovery is normal Agent behavior on this existing Hook.
+  # The CLI requires a verified Agent identity, checks formal work first,
+  # and maintains a durable >=30-minute SQLite cadence. GET only; no POST.
+  SOCIAL_EXIT=0
+  (cd "$REPO" && timeout 6s python3 -m patrol \
+    --config "$CONFIG" --db "$DB" social-sync --if-idle-due \
+    --limit 10 --max-new 3 >/dev/null 2>&1) || SOCIAL_EXIT=$?
+  log "phase6 idle discovery exit=${SOCIAL_EXIT}"
 else
   log "phase3 hook skipped: prior invocation still active"
   silent "previous Hook turn is still active" '{"status":"busy"}'
@@ -61,13 +55,9 @@ if [ ! -f "$DB" ]; then
   exit 0
 fi
 PREPARED=""
-SOCIAL_OPT=()
-if [ "$SOCIAL_IDLE" = "1" ]; then
-  SOCIAL_OPT=(--include-social)
-fi
 if ! PREPARED="$(cd "$REPO" && timeout 8s python3 -m patrol \
     --config "$CONFIG" --db "$DB" host-wakeup-prepare \
-    --owner "$HOOK_OWNER" "${SOCIAL_OPT[@]}" 2>/dev/null)"; then
+    --owner "$HOOK_OWNER" 2>/dev/null)"; then
   silent "wakeup reservation unavailable" '{"status":"deferred"}'
   exit 0
 fi
