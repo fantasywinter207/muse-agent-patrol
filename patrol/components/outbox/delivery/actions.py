@@ -13,7 +13,7 @@ class Outbox:
     def stage(self, logical, actor, action, target, payload, now, producer_id=None, schedule_context=None):
         if action not in ("send","ack","read","project_message","task_thread_reply","room_message",
                           "task_claim","task_progress","task_submit","submission_review","project_decision","artifact_upload","platform_action",
-                          "deployment_syn","deployment_ack") or not actor or not logical:
+                          "deployment_syn","deployment_ack","deployment_bug") or not actor or not logical:
             raise ValueError("unsupported or unattributed action")
         if producer_id is not None and (not isinstance(producer_id,str) or not producer_id.strip() or len(producer_id)>128):
             raise ValueError("invalid audit producer ID")
@@ -47,6 +47,23 @@ class Outbox:
                     or re.fullmatch(r"[A-Za-z0-9._:-]{8,128}",payload["requestId"]) is None
                     or len(canonical(payload).encode("utf-8"))>3000000):
                 raise ValueError("invalid Agent Action Protocol v1 envelope")
+        if action=="deployment_bug":
+            if (not isinstance(payload,dict) or
+                    set(payload)!={"title","component","severity","affectedPlatforms",
+                                   "labels","environment","stepsToReproduce",
+                                   "expectedBehavior","actualBehavior","evidence","relatedApiPath"}
+                    or payload["component"]!="agent-deployment-hatch"
+                    or payload["severity"]!="high"
+                    or any(not isinstance(payload[k],str) or
+                           not 1<=len(payload[k])<=limit
+                           for k,limit in (("title",200),("environment",4000),
+                                           ("stepsToReproduce",8000),
+                                           ("expectedBehavior",8000),("actualBehavior",8000),
+                                           ("evidence",12000)))
+                    or payload["affectedPlatforms"]!=["CrewQuay","HATCH"]
+                    or payload["labels"]!=["deployment","handshake","agent"]
+                    or not isinstance(target,str) or not target.startswith("dph_")):
+                raise ValueError("invalid bounded deployment Bug report")
         if action in ("deployment_syn","deployment_ack"):
             import re
             if not isinstance(payload,dict) or not isinstance(target,str) or not re.fullmatch(r"dph_[0-9a-f]{64}",target):
@@ -191,11 +208,12 @@ class Outbox:
                              WHERE schedule_id=? LIMIT 1""",
                              (schedule_context["id"],)).fetchone():
                             raise StaleLease("social opportunity already staged its one permitted action")
-            if action in ("deployment_syn","deployment_ack"):
+            if action in ("deployment_syn","deployment_ack","deployment_bug"):
                 # The exact deployment's specific human_action Queue lease is
                 # mandatory even before the Scheduler was adopted. A generic
                 # maintenance/social activity cannot forge control messages.
-                col="syn_work_id" if action=="deployment_syn" else "ack_work_id"
+                col=("syn_work_id" if action=="deployment_syn" else
+                     "ack_work_id" if action=="deployment_ack" else "bug_work_id")
                 run=c.execute("SELECT * FROM deployment_runs WHERE handshake_id=? AND actor=?",
                               (target,actor)).fetchone()
                 if (not run or schedule_context is None or
@@ -206,7 +224,11 @@ class Outbox:
                          (payload["nonce"]!=run["nonce"] or payload["challenge"]!=run["challenge"]
                           or payload["synAckMessageId"]!=run["syn_ack_message_id"] or
                           payload["eventId"]!=run["syn_ack_event_id"] or
-                          payload["eventCursor"]!=run["syn_ack_event_cursor"]))):
+                          payload["eventCursor"]!=run["syn_ack_event_cursor"])) or
+                        (action=="deployment_bug" and
+                         (run["state"] not in ("failed","expired") or
+                          run["failure_code"] not in payload["title"] or
+                          run["run_id"] not in payload["stepsToReproduce"]))):
                     raise StaleLease("deployment action requires its own live fenced work and exact platform evidence")
             c.execute("""INSERT INTO outbox(id,actor,action,target,logical_key,idem_key,payload,payload_hash,status,created_at,next_attempt_at)
                 VALUES(?,?,?,?,?,?,?,?,'prepared',?,?)""",(ident,actor,action,target,logical,new_id(),encoded,sha,now,now))
