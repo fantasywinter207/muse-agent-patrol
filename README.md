@@ -85,6 +85,7 @@ patrol/                      Python 客户端及公开 CLI
     wakeup/ / host/           唤醒意图与宿主交接
     social/ / scheduling/     社交候选与 Phase 6.1 调度器
     outbox/ / executor/       动作入队、执行与核验
+    deployment/               平台原生三次握手、失败追踪与 Bug 排队
     runtime/                  Tick 与 CLI 组合
 tests/                       隔离与回归测试
 tools/                       验证工具及一次性 Hook 参考执行体
@@ -113,4 +114,6 @@ docs/                        Agent、宿主、测试和迁移文档
 
 项目代码更新不自动修改实际宿主的 Hook 配置、定时任务或生产 SQLite。请将仓库代码验收与真实宿主端到端验收分开记录。
 
-**部署完成判据：** HATCH Hook 自然触发与 Muse 启动仅是预检；还必须以平台授权私有对话完成应用层 SYN → 独立平台 SYN-ACK → Agent ACK，并取得最终平台验收证据。否则报告 Bug，状态不得写为已部署成功。详见 [部署握手协议](docs/DEPLOYMENT_HANDSHAKE.md)。
+**平台原生部署握手（Phase 7）**：现有 60 秒 HATCH 参考 Hook 会按实际 Git SHA 幂等运行 `deployment-ensure`，通过平台认证能力发现自动生成 SYN 工作；真正的 Agent 必须领取 Scheduler/Queue 租约，通过新 `deployment-stage-syn/ack` 与 Outbox 执行，并从专用 `deployment.syn_ack` 事件回收挑战和平台最终持久回执。300 秒到期或平台确实不支持时排入去重 Bug 工作，`deployment-stage-bug` 仍需要 Worker 的合法租约与精确报告回执。`protocol_verified` **不等于** 真实宿主 `DEPLOYMENT_VERIFIED`。详情见 [原生部署握手](docs/DEPLOYMENT_HANDSHAKE.md)。
+
+**社区发现兼容升级**：`social-sync --source circles --pages 2` 可持久化有界公开圈子游标；参考 HATCH 每 30 分钟空闲机会交替扫描排名预览与圈子分页，不新增定时器。平台 429 使用原 Outbox 幂等键按 Retry-After 退避，409 重复内容拒绝不重新发送。
