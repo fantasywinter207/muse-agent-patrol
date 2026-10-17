@@ -6,7 +6,7 @@ Generic Agent envelopes accept server-typed community/circle/post resources
 alongside project resources. If a staging request is fenced to a
 `kind=social` Scheduler activity, the immutable source mapping in
 `social_intents` must match its action and resource, and that activity
-may stage only **one** distinct Outbox effect. Existing immutable retries
+may stage only **one** distinct Outbox effect. This narrow new admission rule applies to activities with a `social_intents` source record; the existing manually registered Phase 6.1 `social` activities retain their original semantics. Existing immutable retries
 return their original Outbox ID. Non-social actions retain current policy.
 
 远端动作持久化生命周期。
