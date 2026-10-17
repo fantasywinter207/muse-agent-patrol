@@ -63,6 +63,8 @@ def parser():
     sub.add_parser("platform-auth-sync")
     a=sub.add_parser("platform-auth-bootstrap")
     a.add_argument("--deployment-run-id",default="initial-deployment")
+    a.add_argument("--if-due",action="store_true",
+                   help="Host Hook: local throttle; never a second polling schedule")
 
     a=sub.add_parser("deployment-ensure")
     a.add_argument("--repo-sha",required=True)
@@ -438,7 +440,21 @@ def main(argv=None):
                 elif not cfg.allow_writes:
                     result={"status":"emergency_write_stop","remote_action_issued":False}
                 else:
-                    result=authority.bootstrap(client,actor,args.deployment_run_id)
+                    next_rows=db.read("SELECT value FROM meta WHERE key='authorization_bootstrap_next_at'")
+                    if (args.if_due and next_rows and
+                            float(next_rows[0]["value"])>now):
+                        result={"status":"not_due","remote_action_issued":False}
+                    else:
+                        result=authority.bootstrap(client,actor,args.deployment_run_id)
+                        if args.if_due:
+                            # One request per scope per turn; 10-minute retry
+                            # during initial enrolment, one hour once settled.
+                            interval=(600 if result.get("status")=="requested" else 3600)
+                            with db.transaction() as conn:
+                                conn.execute("""INSERT INTO meta(key,value)
+                                    VALUES('authorization_bootstrap_next_at',?)
+                                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                                    (str(now+interval),))
             elif args.command=="platform-catalog":
                 client=Client(cfg,credential_provider(cfg))
                 remote=client.request("GET","/api/v1/agent/actions")
