@@ -130,6 +130,44 @@ class Scheduler:
                   VALUES(?,?, 'work',?,'ready',?,?,?,?,?,?,?)""",
                   (new_id(),key,row["id"],score,50,deadline,4,now,now,now))
                 added+=1
+            # Non-human_action promises have a separate host wake source, but
+            # previously had no runnable Scheduler activity after wakeup.
+            # Derive a one-shot activity per due next-action checkpoint.
+            # Human_action promises already have a linked work activity.
+            due_promises=c.execute("""SELECT p.id,p.next_action_at
+                FROM promises p JOIN work_items w ON w.id=p.work_item_id
+                WHERE p.status!='done' AND w.type!='human_action'
+                  AND (p.next_action_at<=? OR
+                       (p.first_action_at IS NULL AND p.start_by<=?) OR
+                       (p.due_at IS NOT NULL AND p.due_at<=?))
+                ORDER BY p.next_action_at,p.id LIMIT ?""",
+                (now+120,now,now,limit)).fetchall()
+            for p in due_promises:
+                logical="promise_due:"+p["id"]+":"+str(p["next_action_at"])
+                if c.execute("SELECT 1 FROM schedule_activities WHERE logical_key=?",
+                             (logical,)).fetchone():
+                    continue
+                c.execute("""INSERT INTO schedule_activities
+                    (id,logical_key,kind,work_id,status,base_priority,weight,
+                     deadline,switch_cost,created_at,ready_since,last_updated)
+                    VALUES(?,?,'promise',NULL,'ready',95,60,?,4,?,?,?)""",
+                    (new_id(),logical,p["next_action_at"],now,now,now))
+                added+=1
+            # Advance old checkpoints only when their promise has recorded
+            # progress (new next_action_at) or has been completed. A lease
+            # generation is fenced at the same local transaction boundary.
+            c.execute("""UPDATE schedule_activities SET status='completed',
+                lease_owner=NULL,lease_until=NULL,slice_until=NULL,
+                lease_version=lease_version+1,preempt_requested=0,
+                preempt_mode=NULL,last_updated=?,
+                preempt_reason='promise advanced or completed'
+                WHERE kind='promise' AND logical_key LIKE 'promise_due:%'
+                AND status IN ('ready','running','suspended')
+                AND NOT EXISTS(
+                    SELECT 1 FROM promises p WHERE p.status!='done'
+                    AND schedule_activities.logical_key=
+                       ('promise_due:'||p.id||':'||CAST(p.next_action_at AS TEXT))
+                )""",(now,))
             # External workers retain their own Queue fencing. A locally
             # completed work item invalidates an unleased scheduled copy,
             # but cannot undo anything already dispatched to Outbox.
@@ -369,6 +407,16 @@ class Scheduler:
                                (row["work_id"],)).fetchone()
                 if not work or work["status"]!="done":
                     raise ValueError("linked local work must be completed with separate work-finish evidence")
+            if row["kind"]=="promise" and row["logical_key"].startswith("promise_due:"):
+                # An activity cannot make an outstanding commitment silently
+                # disappear; record actual promise progress or completion first.
+                current=c.execute("""SELECT 1 FROM promises p
+                    WHERE p.status!='done'
+                    AND ('promise_due:'||p.id||':'||
+                        CAST(p.next_action_at AS TEXT))=?""",
+                    (row["logical_key"],)).fetchone()
+                if current:
+                    raise ValueError("promise progress or completion evidence required")
             if row["kind"]=="social" and c.execute(
                     "SELECT 1 FROM social_intents WHERE activity_id=?",
                     (ident,)).fetchone():
