@@ -216,7 +216,14 @@ class Outbox:
                      "ack_work_id" if action=="deployment_ack" else "bug_work_id")
                 run=c.execute("SELECT * FROM deployment_runs WHERE handshake_id=? AND actor=?",
                               (target,actor)).fetchone()
-                if (not run or schedule_context is None or
+                phase={"deployment_syn":"syn","deployment_ack":"ack",
+                       "deployment_bug":"bug"}[action]
+                expected_states=({"deployment_syn":("awaiting_syn","syn_staged"),
+                                  "deployment_ack":("syn_ack_received","ack_staged"),
+                                  "deployment_bug":("failed","expired")})[action]
+                if (not run or logical!="deployment:"+run["id"]+":"+phase
+                        or run["state"] not in expected_states
+                        or schedule_context is None or
                         live["work_id"]!=run[col] or
                         (action=="deployment_syn" and
                          (payload["runId"]!=run["run_id"] or payload["nonce"]!=run["nonce"])) or
