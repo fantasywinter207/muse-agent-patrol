@@ -120,6 +120,25 @@ class WakeupExecutionReceiptsTests(unittest.TestCase):
             "SELECT status FROM wakeup_execution_receipts WHERE wakeup_id=?",
             (wake["id"],))[0]["status"],"finished")
 
+    def test_same_worker_can_attest_progress_after_safe_point_resume(self):
+        wid,wake=self.accepted_work()
+        first=self.schedule.dispatch("muse",1002)["activity"]
+        self.wake.record_execution(wake["id"],wake["lease_version"],
+            first["id"],first["lease_version"],"muse","started",1003,
+            {"session":"started"})
+        self.schedule.checkpoint(first["id"],"muse",first["lease_version"],
+            1004,{"step":"yield"},voluntary=True)
+        resumed=self.schedule.dispatch("muse",1005)["activity"]
+        self.assertGreater(resumed["lease_version"],first["lease_version"])
+        step=self.wake.record_execution(wake["id"],wake["lease_version"],
+            resumed["id"],resumed["lease_version"],"muse","progress",1006,
+            {"step":"resumed"})
+        self.assertEqual(step["phase"],"progress")
+        with self.assertRaises(StaleLease):
+            self.wake.record_execution(wake["id"],wake["lease_version"],
+                first["id"],first["lease_version"],"muse","progress",1007,
+                {"step":"stale"})
+
     def test_expired_start_gets_alert_without_false_finish(self):
         wid,wake=self.accepted_work()
         running=self.schedule.dispatch("muse",1002)["activity"]
