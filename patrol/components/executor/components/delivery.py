@@ -102,7 +102,7 @@ class ActionSender:
     def can_send(self,row):
         if not self.config.allow_writes or not self.actor or self.actor!=row["actor"]:
             return False,"explicit write authorization and current matching actor required"
-        if row["action"] in ("deployment_syn","deployment_ack"):
+        if row["action"] in ("deployment_syn","deployment_ack","deployment_bug"):
             run=self.db.read("SELECT * FROM deployment_runs WHERE actor=? AND handshake_id=?",
                              (row["actor"],row["target"]))
             if not run:
@@ -113,7 +113,7 @@ class ActionSender:
                         r["nonce"]!=row["payload"]["nonce"] or
                         r["state"] not in ("awaiting_syn","syn_staged","awaiting_event","syn_ack_received")):
                     return False,"SYN not authorized in deployment phase"
-            else:
+            elif row["action"]=="deployment_ack":
                 p=row["payload"]
                 if (r["state"] not in ("syn_ack_received","ack_staged","protocol_verified") or
                         r["nonce"]!=p["nonce"] or r["challenge"]!=p["challenge"] or
@@ -122,6 +122,12 @@ class ActionSender:
                         r["syn_ack_message_id"]!=p["synAckMessageId"] or
                         r["expires_at"] is None or self.clock()>=r["expires_at"]):
                     return False,"ACK requires current unexpired authenticated event"
+            else:
+                if (r["state"] not in ("failed","expired") or
+                        not r["failure_code"] or
+                        r["failure_code"] not in row["payload"]["title"] or
+                        r["run_id"] not in row["payload"]["stepsToReproduce"]):
+                    return False,"Bug requires actual durable failed deployment"
             return True,None
         if row["action"] in ("send","read"):
             allowed, reason=self._chat_allowed(row["target"])
@@ -174,7 +180,9 @@ class ActionSender:
         return True,None
 
     def send(self,row):
-        if row["action"]=="deployment_syn":
+        if row["action"]=="deployment_bug":
+            path="/api/v1/bugs"
+        elif row["action"]=="deployment_syn":
             path="/api/v1/agent/deployment/handshakes"
         elif row["action"]=="deployment_ack":
             path="/api/v1/agent/deployment/handshakes/"+quote(row["target"],safe="")+"/ack"
@@ -200,6 +208,26 @@ class ActionSender:
         return self.client.request("POST",path,payload,row["idem_key"])
 
     def verify(self,row,response):
+        if row["action"]=="deployment_bug":
+            # Exact Bug ID must come from the original HTTP response (or
+            # already persisted remote_id); never guess an existing report.
+            bug=response.get("bugId") if isinstance(response,dict) else None
+            if bug is None and isinstance(response,dict):
+                bug=response.get("id")
+            bug=bug or row.get("remote_id")
+            if not isinstance(bug,str) or not bug.startswith("bug_"):
+                return None
+            try:
+                detail=self.client.request("GET","/api/v1/bugs/"+quote(bug,safe=""))
+            except Exception:
+                return None
+            if (detail.status!=200 or not isinstance(detail.body,dict) or
+                    detail.body.get("bugId")!=bug or
+                    detail.body.get("reporterId")!=row["actor"] or
+                    detail.body.get("title")!=row["payload"]["title"] or
+                    detail.body.get("component")!="agent-deployment-hatch"):
+                return None
+            return {"id":bug,"source":"CrewQuay exact Bug ID and reporter readback"}
         if row["action"] in ("deployment_syn","deployment_ack"):
             # A successful HTTP 200 alone is insufficient: only platform
             # authenticated readback of the same actor and protocol record.
