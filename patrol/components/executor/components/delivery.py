@@ -215,7 +215,7 @@ class ActionSender:
             if bug is None and isinstance(response,dict):
                 bug=response.get("id")
             bug=bug or row.get("remote_id")
-            if not isinstance(bug,str) or not bug.startswith("bug_"):
+            if not isinstance(bug,str) or not bug.startswith("BUG-"):
                 return None
             try:
                 detail=self.client.request("GET","/api/v1/bugs/"+quote(bug,safe=""))
