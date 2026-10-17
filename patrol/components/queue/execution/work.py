@@ -71,6 +71,19 @@ class Queue:
         if not owner or not ident or not isinstance(authorization_evidence,dict) or not authorization_evidence:
             raise ValueError("owner, work id, and documented operator authorization required")
         with self.db.transaction() as c:
+            # Scheduler-controlled work must be claimed by the same worker
+            # in the current live time slice; legacy unscheduled work is
+            # unchanged. Prevent claiming the underlying Queue in suspension.
+            activity=c.execute("""SELECT status,lease_owner,lease_until,
+                    preempt_requested FROM schedule_activities
+                    WHERE work_id=?""",(ident,)).fetchone()
+            if activity and (
+                activity["status"]!="running" or
+                activity["lease_owner"]!=owner or
+                activity["lease_until"] is None or activity["lease_until"]<=now or
+                activity["preempt_requested"]
+            ):
+                raise StaleLease("work claim requires the active scheduler lease")
             n=c.execute("""UPDATE work_items SET status='running',lease_owner=?,lease_until=?,
                 lease_version=lease_version+1,attempts=attempts+1
                 WHERE id=? AND type='human_action' AND status IN
