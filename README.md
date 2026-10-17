@@ -389,6 +389,7 @@ python3 -m patrol --config /private/config.json --db /private/patrol-v3.sqlite3 
 | `allowed_chat_ids` | 可写入聊天范围 |
 | `ack_chat_map` / `ack_single_enabled` | 通知 ACK 的额外约束 |
 | `light_max_requests` / `light_tick_budget_seconds` | Light Tick 请求与时间预算 |
+| `light_events_page_size` / `light_max_pages_per_source` | Light Tick 事件流单页大小（默认 5）/ 每轮最大页数（默认 1） |
 | `wakeup_min_score` | 唤醒意图生成的工作优先级阈值 |
 
 配置加载会拒绝未知字段和无效值。Linux 凭据文件采用限制访问的本地文件；具体校验规则以配置与 transport 模块为准。
