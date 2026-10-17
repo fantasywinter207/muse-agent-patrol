@@ -102,6 +102,33 @@ class ActionSender:
     def can_send(self,row):
         if not self.config.allow_writes or not self.actor or self.actor!=row["actor"]:
             return False,"explicit write authorization and current matching actor required"
+        if row["action"] in ("deployment_syn","deployment_ack","deployment_bug"):
+            run=self.db.read("SELECT * FROM deployment_runs WHERE actor=? AND handshake_id=?",
+                             (row["actor"],row["target"]))
+            if not run:
+                return False,"no matching registered deployment run"
+            r=run[0]
+            if row["action"]=="deployment_syn":
+                if (r["run_id"]!=row["payload"]["runId"] or
+                        r["nonce"]!=row["payload"]["nonce"] or
+                        r["state"] not in ("awaiting_syn","syn_staged","awaiting_event","syn_ack_received")):
+                    return False,"SYN not authorized in deployment phase"
+            elif row["action"]=="deployment_ack":
+                p=row["payload"]
+                if (r["state"] not in ("syn_ack_received","ack_staged","protocol_verified") or
+                        r["nonce"]!=p["nonce"] or r["challenge"]!=p["challenge"] or
+                        r["syn_ack_event_id"]!=p["eventId"] or
+                        r["syn_ack_event_cursor"]!=p["eventCursor"] or
+                        r["syn_ack_message_id"]!=p["synAckMessageId"] or
+                        r["expires_at"] is None or self.clock()>=r["expires_at"]):
+                    return False,"ACK requires current unexpired authenticated event"
+            else:
+                if (r["state"] not in ("failed","expired") or
+                        not r["failure_code"] or
+                        r["failure_code"] not in row["payload"]["title"] or
+                        r["run_id"] not in row["payload"]["stepsToReproduce"]):
+                    return False,"Bug requires actual durable failed deployment"
+            return True,None
         if row["action"] in ("send","read"):
             allowed, reason=self._chat_allowed(row["target"])
             if not allowed:
@@ -153,7 +180,13 @@ class ActionSender:
         return True,None
 
     def send(self,row):
-        if row["action"]=="ack":
+        if row["action"]=="deployment_bug":
+            path="/api/v1/bugs"
+        elif row["action"]=="deployment_syn":
+            path="/api/v1/agent/deployment/handshakes"
+        elif row["action"]=="deployment_ack":
+            path="/api/v1/agent/deployment/handshakes/"+quote(row["target"],safe="")+"/ack"
+        elif row["action"]=="ack":
             path="/api/v1/inbox/ack"
         elif row["action"]=="project_message":
             path="/api/v1/projects/"+quote(row["target"],safe="")+"/messages"
@@ -175,6 +208,67 @@ class ActionSender:
         return self.client.request("POST",path,payload,row["idem_key"])
 
     def verify(self,row,response):
+        if row["action"]=="deployment_bug":
+            # Exact Bug ID must come from the original HTTP response (or
+            # already persisted remote_id); never guess an existing report.
+            bug=response.get("bugId") if isinstance(response,dict) else None
+            if bug is None and isinstance(response,dict):
+                bug=response.get("id")
+            bug=bug or row.get("remote_id")
+            if not isinstance(bug,str) or not bug.startswith("BUG-"):
+                return None
+            try:
+                detail=self.client.request("GET","/api/v1/bugs/"+quote(bug,safe=""))
+            except Exception:
+                return None
+            if (detail.status!=200 or not isinstance(detail.body,dict) or
+                    detail.body.get("bugId")!=bug or
+                    detail.body.get("reporterId")!=row["actor"] or
+                    detail.body.get("title")!=row["payload"]["title"] or
+                    detail.body.get("component")!="agent-deployment-hatch"):
+                return None
+            return {"id":bug,"source":"CrewQuay exact Bug ID and reporter readback"}
+        if row["action"] in ("deployment_syn","deployment_ack"):
+            # A successful HTTP 200 alone is insufficient: only platform
+            # authenticated readback of the same actor and protocol record.
+            try:
+                remote=self.client.request("GET","/api/v1/agent/deployment/handshakes/"+
+                                           quote(row["target"],safe=""))
+            except Exception:
+                return None
+            if remote.status!=200 or not isinstance(remote.body,dict):
+                return None
+            body=remote.body
+            evidence=body.get("evidence")
+            if (body.get("protocolVersion")!="1" or
+                    body.get("actorId")!=row["actor"] or
+                    body.get("handshakeId")!=row["target"] or
+                    body.get("hostHookVerified") is not False or
+                    not isinstance(evidence,dict) or
+                    evidence.get("platformSenderId")!="crewquay-platform" or
+                    not isinstance(evidence.get("synMessageId"),str) or
+                    not isinstance(evidence.get("synAckMessageId"),str) or
+                    evidence["synMessageId"]==evidence["synAckMessageId"]):
+                return None
+            if row["action"]=="deployment_syn":
+                if (body.get("runId")!=row["payload"]["runId"] or
+                        body.get("status") not in ("awaiting_ack","protocol_verified") or
+                        not isinstance(body.get("expiresAt"),str)):
+                    return None
+                return {"id":row["target"],"source":"CrewQuay authenticated deployment SYN status",
+                        "expires_at":body["expiresAt"]}
+            payload=row["payload"]
+            if (body.get("status")!="protocol_verified" or
+                    evidence.get("synAckMessageId")!=payload["synAckMessageId"] or
+                    evidence.get("synAckEventId")!=payload["eventId"] or
+                    evidence.get("synAckEventCursor")!=payload["eventCursor"] or
+                    not isinstance(evidence.get("ackMessageId"),str) or
+                    len({evidence["synMessageId"],evidence["synAckMessageId"],
+                         evidence["ackMessageId"]})!=3):
+                return None
+            return {"id":evidence["ackMessageId"],
+                    "source":"CrewQuay authoritative final ACK status",
+                    "handshake_id":row["target"]}
         # Reconciling a previously submitted effect is read-only. Owner
         # prohibitions prevent NEW writes but must not erase evidence of a
         # possible earlier write; the server still checks GET visibility.

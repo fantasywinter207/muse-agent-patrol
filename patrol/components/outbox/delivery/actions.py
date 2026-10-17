@@ -12,7 +12,8 @@ class Outbox:
 
     def stage(self, logical, actor, action, target, payload, now, producer_id=None, schedule_context=None):
         if action not in ("send","ack","read","project_message","task_thread_reply","room_message",
-                          "task_claim","task_progress","task_submit","submission_review","project_decision","artifact_upload","platform_action") or not actor or not logical:
+                          "task_claim","task_progress","task_submit","submission_review","project_decision","artifact_upload","platform_action",
+                          "deployment_syn","deployment_ack","deployment_bug") or not actor or not logical:
             raise ValueError("unsupported or unattributed action")
         if producer_id is not None and (not isinstance(producer_id,str) or not producer_id.strip() or len(producer_id)>128):
             raise ValueError("invalid audit producer ID")
@@ -46,6 +47,47 @@ class Outbox:
                     or re.fullmatch(r"[A-Za-z0-9._:-]{8,128}",payload["requestId"]) is None
                     or len(canonical(payload).encode("utf-8"))>3000000):
                 raise ValueError("invalid Agent Action Protocol v1 envelope")
+        if action=="deployment_bug":
+            if (not isinstance(payload,dict) or
+                    set(payload)!={"title","component","severity","affectedPlatforms",
+                                   "labels","environment","stepsToReproduce",
+                                   "expectedBehavior","actualBehavior","evidence","relatedApiPath"}
+                    or payload["component"]!="agent-deployment-hatch"
+                    or payload["severity"]!="high"
+                    or any(not isinstance(payload[k],str) or
+                           not 1<=len(payload[k])<=limit
+                           for k,limit in (("title",200),("environment",4000),
+                                           ("stepsToReproduce",8000),
+                                           ("expectedBehavior",8000),("actualBehavior",8000),
+                                           ("evidence",12000)))
+                    or payload["affectedPlatforms"]!=["CrewQuay","HATCH"]
+                    or payload["labels"]!=["deployment","handshake","agent"]
+                    or not isinstance(target,str) or not target.startswith("dph_")):
+                raise ValueError("invalid bounded deployment Bug report")
+        if action in ("deployment_syn","deployment_ack"):
+            import re
+            if not isinstance(payload,dict) or not isinstance(target,str) or not re.fullmatch(r"dph_[0-9a-f]{64}",target):
+                raise ValueError("deployment must target canonical handshake ID")
+            if action=="deployment_syn":
+                if (set(payload)!={"runId","nonce","hookKind","hookIntervalSeconds"} or
+                        not isinstance(payload["runId"],str) or
+                        re.fullmatch(r"[A-Za-z0-9._:-]{8,100}",payload["runId"]) is None or
+                        not isinstance(payload["nonce"],str) or
+                        re.fullmatch(r"[A-Za-z0-9_-]{16,128}",payload["nonce"]) is None or
+                        payload["hookKind"]!="HATCH" or
+                        type(payload["hookIntervalSeconds"]) is not int or
+                        payload["hookIntervalSeconds"]!=60):
+                    raise ValueError("invalid CrewQuay deployment SYN contract")
+            else:
+                if (set(payload)!={"nonce","challenge","synAckMessageId","eventId","eventCursor"} or
+                        not isinstance(payload["nonce"],str) or
+                        re.fullmatch(r"[A-Za-z0-9_-]{16,128}",payload["nonce"]) is None or
+                        not isinstance(payload["challenge"],str) or
+                        re.fullmatch(r"[a-f0-9]{64}",payload["challenge"]) is None or
+                        any(not isinstance(payload[k],str) or not 1<=len(payload[k])<=120
+                            for k in ("synAckMessageId","eventId"))):
+                    raise ValueError("invalid CrewQuay deployment ACK contract")
+                cursor(payload["eventCursor"])
         if action=="task_claim":
             if not isinstance(payload,dict) or set(payload)!={"expectedVersion"} or type(payload["expectedVersion"]) is not int or payload["expectedVersion"]<=0:
                 raise ValueError("task claim requires positive expectedVersion")
@@ -166,6 +208,35 @@ class Outbox:
                              WHERE schedule_id=? LIMIT 1""",
                              (schedule_context["id"],)).fetchone():
                             raise StaleLease("social opportunity already staged its one permitted action")
+            if action in ("deployment_syn","deployment_ack","deployment_bug"):
+                # The exact deployment's specific human_action Queue lease is
+                # mandatory even before the Scheduler was adopted. A generic
+                # maintenance/social activity cannot forge control messages.
+                col=("syn_work_id" if action=="deployment_syn" else
+                     "ack_work_id" if action=="deployment_ack" else "bug_work_id")
+                run=c.execute("SELECT * FROM deployment_runs WHERE handshake_id=? AND actor=?",
+                              (target,actor)).fetchone()
+                phase={"deployment_syn":"syn","deployment_ack":"ack",
+                       "deployment_bug":"bug"}[action]
+                expected_states=({"deployment_syn":("awaiting_syn","syn_staged"),
+                                  "deployment_ack":("syn_ack_received","ack_staged"),
+                                  "deployment_bug":("failed","expired")})[action]
+                if (not run or logical!="deployment:"+run["id"]+":"+phase
+                        or run["state"] not in expected_states
+                        or schedule_context is None or
+                        live["work_id"]!=run[col] or
+                        (action=="deployment_syn" and
+                         (payload["runId"]!=run["run_id"] or payload["nonce"]!=run["nonce"])) or
+                        (action=="deployment_ack" and
+                         (payload["nonce"]!=run["nonce"] or payload["challenge"]!=run["challenge"]
+                          or payload["synAckMessageId"]!=run["syn_ack_message_id"] or
+                          payload["eventId"]!=run["syn_ack_event_id"] or
+                          payload["eventCursor"]!=run["syn_ack_event_cursor"])) or
+                        (action=="deployment_bug" and
+                         (run["state"] not in ("failed","expired") or
+                          run["failure_code"] not in payload["title"] or
+                          run["run_id"] not in payload["stepsToReproduce"]))):
+                    raise StaleLease("deployment action requires its own live fenced work and exact platform evidence")
             c.execute("""INSERT INTO outbox(id,actor,action,target,logical_key,idem_key,payload,payload_hash,status,created_at,next_attempt_at)
                 VALUES(?,?,?,?,?,?,?,?,'prepared',?,?)""",(ident,actor,action,target,logical,new_id(),encoded,sha,now,now))
             if producer_id is not None:
@@ -262,7 +333,7 @@ class Outbox:
                     # must be verified by ID and not blindly reposted.
                     if isinstance(response.body,dict):
                         message=response.body.get("message",response.body)
-                        remote=message.get("messageId") or message.get("id")
+                        remote=message.get("messageId") or message.get("id") or message.get("bugId")
                         if remote:
                             with self.db.transaction() as c:
                                 c.execute("UPDATE outbox SET remote_id=? WHERE id=? AND dispatch_owner=?",
@@ -276,9 +347,19 @@ class Outbox:
                     else:
                         self._result(row["id"],token,"unknown",now+300,
                                      "success response unconfirmed")
+                elif response and response.status==429:
+                    # A definitive server-side rate rejection has not
+                    # committed the requested business write. Retain the SAME
+                    # immutable key/payload and honor the bounded retry delay.
+                    self._result(row["id"],token,"retry_wait",
+                                 now+max(30,response.retry_after),
+                                 "HTTP 429 rate limited; retry same key")
                 elif response and response.status in (400,401,403,404,409,422):
+                    error=response.body.get("error") if isinstance(response.body,dict) else None
+                    code=error.get("code") if isinstance(error,dict) else None
+                    suffix=" DUPLICATE_SOCIAL_CONTENT" if code=="DUPLICATE_SOCIAL_CONTENT" else ""
                     self._result(row["id"],token,"permanent_failed",now,
-                                 "HTTP "+str(response.status))
+                                 "HTTP "+str(response.status)+suffix)
                 else:
                     self._result(row["id"],token,"unknown",now+300,
                                  "ambiguous remote result")

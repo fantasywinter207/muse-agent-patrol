@@ -12,6 +12,7 @@ from datetime import datetime
 from dataclasses import replace
 from pathlib import Path
 from ...config.index import load_config
+from ...deployment.index import Deployment
 from ...host.index import HostHandoff
 from ...migration.index import migrate_legacy
 from ...outbox.index import Outbox
@@ -59,9 +60,26 @@ def parser():
     sub.add_parser("doctor")
     sub.add_parser("status")
     sub.add_parser("platform-catalog")
+    a=sub.add_parser("deployment-ensure")
+    a.add_argument("--repo-sha",required=True)
+    a=sub.add_parser("deployment-start")
+    a.add_argument("--repo-sha",required=True,
+                   help="actual installed Patrol commit SHA (7-40 lowercase hex)")
+    a=sub.add_parser("deployment-status")
+    a.add_argument("--id")
+    sub.add_parser("deployment-reconcile")
+    for phase in ("syn","ack","bug"):
+        a=sub.add_parser("deployment-stage-"+phase)
+        a.add_argument("id",help="durable deployment run ID, NOT handshake ID")
+        a.add_argument("--owner",required=True)
+        a.add_argument("--schedule-id",required=True)
+        a.add_argument("--schedule-generation",type=int,required=True)
+        a.add_argument("--producer-id")
     a=sub.add_parser("social-sync")
     a.add_argument("--limit",type=int,default=10)
     a.add_argument("--max-new",type=int,default=3)
+    a.add_argument("--source",choices=("ranked","circles"),default="ranked")
+    a.add_argument("--pages",type=int,default=1)
     a.add_argument("--if-idle-due",action="store_true",
                    help="Hook-only: at most one idle discovery per 30 minutes")
     a=sub.add_parser("social-detail")
@@ -281,9 +299,55 @@ def main(argv=None):
                 result=migrate_legacy(db,args.directory,now,args.confirm_stopped)
             elif args.command=="backup":
                 result={"backup":db.backup(args.destination),"integrity":"ok"}
+            elif args.command in ("deployment-start","deployment-ensure"):
+                # Called by the existing HATCH Hook once per installed SHA.
+                # All subsequent turns use local status and never issue a
+                # capability GET or generate duplicate runs/work.
+                bound=db.read("SELECT value FROM meta WHERE key='actor'")
+                current=Deployment(db).get() if bound else None
+                if (args.command=="deployment-ensure" and current and
+                        current.get("repo_sha")==args.repo_sha):
+                    result={"status":"already_initialized","deployment":current,
+                            "remote_action_issued":False}
+                elif not bound:
+                    result={"status":"identity_pending","deployment_verified":False}
+                elif not cfg.allow_writes:
+                    result={"status":"authorization_failed","deployment_verified":False}
+                else:
+                    client=Client(cfg,credential_provider(cfg))
+                    reply=client.request("GET","/api/v1/agent/deployment/capabilities")
+                    if reply.status in (0,408,429) or reply.status>=500:
+                        result={"status":"deferred","remote_status":reply.status,
+                                "deployment_verified":False,"retry_after":reply.retry_after}
+                    elif reply.status in (401,403):
+                        result={"status":"authorization_failed","deployment_verified":False}
+                    elif (reply.status!=200 or not isinstance(reply.body,dict) or
+                            reply.body.get("supported") is not True or
+                            reply.body.get("protocolVersion")!="1" or
+                            reply.body.get("actorId")!=bound[0]["value"] or
+                            reply.body.get("synAckEventType")!="deployment.syn_ack" or
+                            reply.body.get("platformSenderId")!="crewquay-platform" or
+                            reply.body.get("windowSeconds")!=300):
+                        result=Deployment(db).unsupported(now,args.repo_sha)
+                    else:
+                        result=Deployment(db).start(now,args.repo_sha)
+            elif args.command=="deployment-status":
+                result=Deployment(db).get(args.id)
+            elif args.command=="deployment-reconcile":
+                result={"local_transitions":Deployment(db).reconcile(now),
+                        "remote_action_issued":False}
+            elif args.command in ("deployment-stage-syn","deployment-stage-ack","deployment-stage-bug"):
+                if not cfg.allow_writes:
+                    raise ValueError("deployment outbound writes disabled")
+                phase=args.command[len("deployment-stage-"):]
+                result=Deployment(db).stage(args.id,phase,now,
+                    {"id":args.schedule_id,"owner":args.owner,
+                     "generation":args.schedule_generation},
+                    producer_id=args.producer_id)
             elif args.command=="social-sync":
-                if not 1<=args.limit<=20 or not 1<=args.max_new<=3:
-                    raise ValueError("social-sync limit must be 1..20 and max-new 1..3")
+                if (not 1<=args.limit<=20 or not 1<=args.max_new<=3 or
+                        not 1<=args.pages<=3 or (args.source!="circles" and args.pages!=1)):
+                    raise ValueError("social-sync limit 1..20, max-new 1..3, circles pages 1..3")
                 if not cfg.community_social_enabled:
                     result={"status":"disabled_by_owner","remote_action_issued":False,
                             "new_activities":0,"model_invoked":False,"host_woken":False}
@@ -291,13 +355,64 @@ def main(argv=None):
                     result={"status":"not_due_or_busy","remote_action_issued":False}
                 else:
                     client=Client(cfg,credential_provider(cfg))
-                    remote=client.request("GET","/api/v1/agent/social/opportunities?limit="+str(args.limit))
-                    if remote.status==200:
-                        result=SocialOpportunities(db).admit(remote.body,now,args.max_new)
+                    if args.source=="ranked":
+                        remote=client.request("GET","/api/v1/agent/social/opportunities?limit="+str(args.limit))
+                        if remote.status==200:
+                            result=SocialOpportunities(db).admit(remote.body,now,args.max_new)
+                        else:
+                            result={"status":"deferred","remote_status":remote.status,
+                                    "model_invoked":False,"host_woken":False,
+                                    "remote_action_issued":False}
                     else:
-                        result={"status":"deferred","remote_status":remote.status,
-                                "model_invoked":False,"host_woken":False,
-                                "remote_action_issued":False}
+                        from urllib.parse import urlencode
+                        import re
+                        old=db.read("SELECT value FROM meta WHERE key='social_circle_cursor'")
+                        after=old[0]["value"] if old else ""
+                        if after and not re.fullmatch(r"cir_[A-Za-z0-9_-]{1,112}",after):
+                            raise ValueError("invalid saved circle discovery cursor")
+                        admitted=[]
+                        scanned=0
+                        status="ok"
+                        more=True
+                        for _ in range(args.pages):
+                            if len(admitted)>=args.max_new:
+                                break
+                            query={"source":"circles","limit":args.limit}
+                            if after:
+                                query["after"]=after
+                            remote=client.request("GET","/api/v1/agent/social/opportunities?"+
+                                                   urlencode(query))
+                            if remote.status!=200:
+                                status="deferred"
+                                break
+                            page=remote.body
+                            if (not isinstance(page,dict) or page.get("source")!="circles"
+                                    or type(page.get("hasMore")) is not bool
+                                    or not isinstance(page.get("nextCursor"),str)):
+                                raise ValueError("invalid circle page contract")
+                            nxt=page["nextCursor"]
+                            if page["hasMore"] and (
+                                    not re.fullmatch(r"cir_[A-Za-z0-9_-]{1,112}",nxt)
+                                    or (after and nxt<=after)):
+                                raise ValueError("invalid circle cursor progression")
+                            picked=SocialOpportunities(db).admit(
+                                page,now,args.max_new-len(admitted))
+                            admitted.extend(picked["activities"])
+                            scanned+=1
+                            more=page["hasMore"]
+                            after=nxt if more else ""
+                            with db.transaction() as c:
+                                c.execute("""INSERT INTO meta(key,value)
+                                    VALUES('social_circle_cursor',?)
+                                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                                    (after,))
+                            if not more:
+                                break
+                        result={"status":status,"source":"circles",
+                                "pages_scanned":scanned,"next_cursor":after,
+                                "has_more":more,"new_activities":len(admitted),
+                                "activities":admitted,"model_invoked":False,
+                                "host_woken":False,"remote_action_issued":False}
             elif args.command=="social-detail":
                 result=SocialOpportunities(db).details(args.id)
             elif args.command=="platform-catalog":

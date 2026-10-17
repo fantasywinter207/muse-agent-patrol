@@ -34,7 +34,7 @@ def main():
         # Windows runner SQLite/file I/O under hosted CI can be markedly
         # slower than Linux. Keep a finite cap, but avoid false-negative
         # timeouts for a healthy full unit test suite.
-        deadline=300 if index==0 and platform.system()=="Windows" else 180
+        deadline=480 if index==0 and platform.system()=="Windows" else 180
         r=subprocess.run(cmd,cwd=root,capture_output=True,text=True,timeout=deadline)
         name="command-"+str(index+1)+".txt"
         raw="$ "+" ".join(cmd)+"\n"+r.stdout+"\n"+r.stderr+"\nexit="+str(r.returncode)+"\n"

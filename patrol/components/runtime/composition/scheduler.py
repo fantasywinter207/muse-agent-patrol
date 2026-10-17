@@ -3,6 +3,7 @@ import json
 import time
 from urllib.parse import quote
 from ...attention.index import Attention
+from ...deployment.index import Deployment
 from ...collection.index import Collector, Sync, event_time
 from ...outbox.index import Outbox
 from ...executor.index import ActionSender
@@ -65,6 +66,11 @@ class Tick(ActionSender):
                     kind=value.get("type","")
                     if kind=="event.redacted":
                         evidence["kind"]="redacted_agent_event"
+                    elif kind in ("deployment.syn_ack","deployment.protocol_verified"):
+                        # Dedicated trusted-control recognizer consumes the
+                        # durable Agent Event Feed pointer with strict IDs.
+                        # Never synthesize generic chat/social work from it.
+                        evidence["kind"]="deployment_control_pointer_persisted"
                     elif isinstance(value.get("message"),dict):
                         # Normalized message, receipt and inspector are
                         # durably persisted in the exact source page txn.
@@ -206,6 +212,7 @@ class Tick(ActionSender):
                 if event_result!="complete":
                     report["incomplete_sources"].append("agent_events:"+event_result)
                 report["errors"].extend(self.collector.errors)
+            report["deployment"]=Deployment(self.db).reconcile(self.clock())
             report["completed_work"]+=self.execute(
                 self.config.max_work_per_tick,local_only=True)
         except (BudgetExceeded,AuthError) as e:

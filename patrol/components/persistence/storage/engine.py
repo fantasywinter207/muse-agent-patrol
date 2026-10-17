@@ -149,6 +149,22 @@ CREATE TABLE IF NOT EXISTS outbox(
 -- Agent workers draft actions, but only the verified CrewQuay actor may send.
 -- Separate immutable production provenance avoids treating a Hook worker
 -- name as a platform execution identity. Safe additive table for old v1 DBs.
+CREATE TABLE IF NOT EXISTS deployment_runs(
+  id TEXT PRIMARY KEY, actor TEXT NOT NULL,run_id TEXT NOT NULL,
+  nonce TEXT NOT NULL,handshake_id TEXT NOT NULL UNIQUE,
+  repo_sha TEXT NOT NULL,state TEXT NOT NULL,created_at REAL NOT NULL,
+  updated_at REAL NOT NULL,expires_at REAL,
+  syn_work_id TEXT REFERENCES work_items(id),
+  ack_work_id TEXT REFERENCES work_items(id),
+  bug_work_id TEXT REFERENCES work_items(id),
+  bug_outbox_id TEXT REFERENCES outbox(id),
+  syn_outbox_id TEXT REFERENCES outbox(id),
+  ack_outbox_id TEXT REFERENCES outbox(id),
+  syn_ack_event_id TEXT,syn_ack_event_cursor TEXT,
+  syn_ack_message_id TEXT,challenge TEXT,
+  failure_code TEXT,bug_id TEXT,
+  UNIQUE(actor,run_id));
+CREATE INDEX IF NOT EXISTS deployment_actor_due ON deployment_runs(actor,state,updated_at);
 CREATE TABLE IF NOT EXISTS outbox_producers(
  outbox_id TEXT PRIMARY KEY REFERENCES outbox(id) ON DELETE CASCADE,
  producer_id TEXT NOT NULL, recorded_at REAL NOT NULL);
