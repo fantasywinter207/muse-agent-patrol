@@ -181,3 +181,26 @@ class Authorization:
                     "One-time deployment authorization, bounded to existing platform role and project scope")
                 return {"status":"requested","scope":scope,"request":result}
         return {"status":"already_requested_or_approved","scopes":len(groups)}
+
+
+def live_action_authority(sender, row, name, resource_type, resource_id):
+    """Gate legacy typed routes with the same fresh platform authority.
+
+    Only an explicit 404 from an older server permits the *old* restrictive
+    allowlists. Outages, stale caches, 401/403 and malformed manifests deny.
+    No Model/Agent instruction can fabricate this response.
+    """
+    if sender.client is None:
+        return False, "platform_unavailable", False
+    resource={"type":resource_type,"id":resource_id}
+    try:
+        manifest,status=Authorization(sender.db).get(sender.client,row["actor"],resource)
+    except Exception:
+        return False, "manifest_network_unavailable", False
+    if status==404:
+        return True,"legacy_platform",True
+    if status!=200:
+        return False,"manifest_http_"+str(status),False
+    decision,reason=PolicyEngine(sender.db,sender.config).evaluate(
+        row["actor"],{"action":name,"version":"1","resource":resource},manifest)
+    return decision=="ALLOW",decision+":"+reason,False
