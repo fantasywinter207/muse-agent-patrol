@@ -229,6 +229,7 @@ class Tick(ActionSender):
             report["scheduler"]=self.scheduler.reconcile(self.clock())
             report["wakeup_staged"]=self.wakeups.stage(self.clock(),
                 threshold=self.config.wakeup_min_score)
+            report["execution_health"]=self.wakeups.execution_health(self.clock())
             report["wakeup_ready"]=len(self.db.read(
                 "SELECT id FROM wakeup_requests WHERE status IN ('pending','retry_wait') AND next_attempt_at<=?",
                 (self.clock(),)))
@@ -386,6 +387,7 @@ class Tick(ActionSender):
                 report["host_wakeups"]=0
             if ws:
                 ws.close()
+            report["execution_health"]=self.wakeups.execution_health(self.clock())
             report["alerts"]=[{"kind":r["kind"],**json.loads(r["detail"])}
                               for r in self.db.read("SELECT kind,detail FROM alerts WHERE rowid>? ORDER BY rowid",(alert_waterline,))]
             with self.db.transaction() as c:
