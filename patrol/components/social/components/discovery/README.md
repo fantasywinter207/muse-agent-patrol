@@ -18,6 +18,6 @@ lease fencing and separate Outbox policy.
 ## Public boundary
 `index.py:SocialOpportunities`; parent component re-exports this boundary.
 
-## Dependencies
+## Allowed dependencies
 Only the published persistence index and the documented common SQLite
 transaction tables. No private scheduler/queue/host imports.
