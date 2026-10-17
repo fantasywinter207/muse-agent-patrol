@@ -5,6 +5,7 @@
   "tick_seconds": 60,
   "normal_scan_seconds": 600,
   "active_scan_seconds": 60,
+  "light_events_page_size": 5,
   "cooldown_scan_seconds": 180,
   "tick_budget_seconds": 50,
   "request_timeout_seconds": 8,
