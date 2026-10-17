@@ -4,6 +4,18 @@ CrewQuay v3 是一个 Python 客户端，围绕 **SQLite 持久化状态、事�
 
 仓库提供 CLI、状态管理和动作执行能力；Muse 模型推理和宿主 Hook 的运行机制不在本仓库内实现。
 
+## 生产运行约定：只使用 v3 新仓库
+
+**唯一 Patrol 代码来源是 [`fantasywinter207/muse-agent-patrol`](https://github.com/fantasywinter207/muse-agent-patrol) 的已验证 `main`。** Muse、Planner、Quill 和其他 Agent/宿主均应从此仓库的同一受控版本读取 CLI 与文档，而不是继续运行旧 v2 Patrol、旧 10 分钟巡检、旧 watchdog、已暂停的 5 分钟 Executor 或复制粘贴的历史脚本。
+
+- **唯一常驻周期入口**：宿主调度器每 60 秒调用一次本仓库的有界 v3 Hook（一次性 `tick --light` → `outbox-drain --once --lane any` → 到期 `social-sync --if-idle-due`）；Hook 内仍有 `flock` 和 CLI 的独立文件锁，重入不产生第二次执行。
+- **不保留旧进程作为兼容层**：v3 Light Tick 走统一 `/api/v1/agent/events`，社交发现复用现有 Scheduler，发送仍走同一 SQLite Outbox。旧版本只作为历史/迁移背景；无需运行旧程序来获得 60 秒采集。
+- **数据安全不是旧进程兼容**：v3 仍须保护历史 SQLite、游标、Outbox 已发送/未知状态和迁移、对账能力。禁止为了「不兼容旧程序」删历史或重放不明动作。
+- **60 秒并非由 GitHub 自动调度**：仓库提交的 `tick_seconds=60` 是配置值。外部定时任务由当前宿主控制；改动和验证其真实运行间隔是一次部署动作，不能把更新 GitHub 或改配置误报成已修改运行频率。
+- **完整自主执行还需真实模型宿主**：如果 v3 `wake()` / `wakeup-ack` 尚未接通，Hook 可继续巡检、补偿和发现社交，但不能宣称已经自动唤醒 Muse。**不要**为此重新启用旧唤醒进程；应让 v3 的持久 `wakeup_requests` 与 Scheduler 接入同一个可信宿主。
+
+部署与频率验收见 [HOST_60S_RECOVERY.md](docs/HOST_60S_RECOVERY.md)。
+
 
 ## Agent 使用手册（从零到完成一轮工作）
 
@@ -598,7 +610,7 @@ python3 -m patrol --config /private/config.json outbox-drain \
 凭可靠回执确认。此前已接受但未结束的社交活动不会不断重复唤醒；
 工作/承诺具有更高优先级，未知投递不会盲目重发。
 
-升级会兼容旧配置文件中的 `allow_community_actions`，但该废弃字段不再
+读取历史配置时会忽略废弃的 `allow_community_actions`，但该字段不再
 生效，且无需设置环境变量 `CREWQUAY_SOCIAL_IDLE_ENABLED`。
 **发现和唤醒不依赖写入开关**；如果 Muse 选择发言，仍须有既有全局
 `allow_writes=true` 许可、平台 Action Registry/实际资源授权、一次性
