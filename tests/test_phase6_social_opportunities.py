@@ -264,6 +264,59 @@ class SocialTests(unittest.TestCase):
         self.assertFalse(result["should_wake"],result)
         self.assertEqual(result["status"],"idle",result)
 
+    def test_circle_source_pages_persist_cursor_without_extra_writes(self):
+        class FakeClient:
+            paths=[]
+            def __init__(self,*_a,**_k): pass
+            def request(self,method,path):
+                self.paths.append(path)
+                if path.endswith("limit=2"):
+                    b=page(candidate("circle","cir_a"),candidate("circle","cir_b"))
+                    b.update(source="circles",hasMore=True,nextCursor="cir_b")
+                elif path.endswith("after=cir_b"):
+                    b=page(candidate("circle","cir_c"))
+                    b.update(source="circles",hasMore=False,nextCursor="cir_c")
+                else:
+                    raise AssertionError(path)
+                return Response(200,b)
+        out=io.StringIO()
+        with patch("patrol.components.runtime.composition.cli.Client",FakeClient), \
+             patch("patrol.components.runtime.composition.cli.credential_provider",
+                   lambda cfg:lambda:"not-needed"), \
+             contextlib.redirect_stdout(out):
+            code=main(["--db",str(self.db.path),"social-sync","--source","circles",
+                       "--pages","2","--limit","2","--max-new","3"])
+        self.assertEqual(code,0,out.getvalue())
+        report=json.loads(out.getvalue())
+        self.assertEqual(report["new_activities"],3)
+        self.assertEqual(report["pages_scanned"],2)
+        self.assertEqual(report["next_cursor"],"")
+        self.assertFalse(report["has_more"])
+        self.assertEqual(FakeClient.paths,[
+            "/api/v1/agent/social/opportunities?source=circles&limit=2",
+            "/api/v1/agent/social/opportunities?source=circles&limit=2&after=cir_b"])
+        self.assertEqual(self.db.read("SELECT value FROM meta WHERE key='social_circle_cursor'")[0]["value"],"")
+        self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox")[0]["n"],0)
+
+    def test_circle_cursor_contract_failure_keeps_saved_checkpoint(self):
+        with self.db.transaction() as c:
+            c.execute("INSERT INTO meta(key,value) VALUES('social_circle_cursor','cir_old')")
+        class BadClient:
+            def __init__(self,*_a,**_k): pass
+            def request(self,method,path):
+                b=page(candidate("circle","cir_new"))
+                b.update(source="circles",hasMore=True,nextCursor="cir_old")
+                return Response(200,b)
+        out=io.StringIO()
+        with patch("patrol.components.runtime.composition.cli.Client",BadClient), \
+             patch("patrol.components.runtime.composition.cli.credential_provider",
+                   lambda cfg:lambda:"none"), \
+             contextlib.redirect_stdout(out):
+            code=main(["--db",str(self.db.path),"social-sync","--source","circles"])
+        self.assertEqual(code,1)
+        self.assertEqual(json.loads(out.getvalue())["status"],"failed")
+        self.assertEqual(self.db.read("SELECT value FROM meta WHERE key='social_circle_cursor'")[0]["value"],"cir_old")
+
     def test_social_cli_is_opt_in_read_only_discovery(self):
         class FakeClient:
             paths=[]
