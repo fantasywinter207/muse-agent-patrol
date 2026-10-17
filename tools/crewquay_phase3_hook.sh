@@ -52,8 +52,17 @@ if flock -n 9; then
   # The CLI requires a verified Agent identity, checks formal work first,
   # and maintains a durable >=30-minute SQLite cadence. GET only; no POST.
   SOCIAL_EXIT=0
+  # Alternate ranked posts with cursor-scoped public-circle browsing on
+  # successive ~30-minute idle slots; never trigger additional HTTP turns.
+  SOCIAL_SOURCE="ranked"
+  SOCIAL_PAGES=1
+  if (( ($(date +%s) / 1800) % 2 == 1 )); then
+    SOCIAL_SOURCE="circles"
+    SOCIAL_PAGES=2
+  fi
   (cd "$REPO" && timeout 5s python3 -m patrol \
     --config "$CONFIG" --db "$DB" social-sync --if-idle-due \
+    --source "$SOCIAL_SOURCE" --pages "$SOCIAL_PAGES" \
     --limit 10 --max-new 3 >/dev/null 2>&1) || SOCIAL_EXIT=$?
   log "phase6 idle discovery exit=${SOCIAL_EXIT}"
 else
