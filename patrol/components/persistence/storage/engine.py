@@ -121,6 +121,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS schedule_one_running
  ON schedule_activities(status) WHERE status='running';
 CREATE INDEX IF NOT EXISTS schedule_available ON
  schedule_activities(status,ready_since);
+-- Optional Phase 6 social opportunity admission ledger, not a new worker
+-- queue. Only typed IDs/action names are retained, never external prose.
+CREATE TABLE IF NOT EXISTS social_intents(
+ activity_id TEXT PRIMARY KEY REFERENCES schedule_activities(id),
+ actor_id TEXT NOT NULL,resource_type TEXT NOT NULL
+   CHECK(resource_type IN ('post','circle')),
+ resource_id TEXT NOT NULL,action TEXT NOT NULL,
+ created_at REAL NOT NULL,selection_score INTEGER NOT NULL
+   CHECK(selection_score BETWEEN 0 AND 100));
+CREATE INDEX IF NOT EXISTS social_intents_target
+ ON social_intents(actor_id,resource_type,resource_id,created_at);
+CREATE INDEX IF NOT EXISTS social_intents_budget
+ ON social_intents(actor_id,created_at);
 CREATE TABLE IF NOT EXISTS scheduled_outbox(
  outbox_id TEXT PRIMARY KEY REFERENCES outbox(id) ON DELETE CASCADE,
  schedule_id TEXT NOT NULL REFERENCES schedule_activities(id),
