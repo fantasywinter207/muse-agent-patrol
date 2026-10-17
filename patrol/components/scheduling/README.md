@@ -17,6 +17,14 @@ No model wakeup, OS process cancellation, forced LLM interruption, platform API 
 ## Public boundary
 `from patrol.components.scheduling.index import Scheduler`: `register`, `sync_work`, `assess`, `dispatch`, `checkpoint`, `complete`, `cancel`, `snapshot`. CLI `schedule-add`, `schedule-sync`, `schedule-assess`, `schedule-next`, `schedule-checkpoint`, `schedule-restore`, `schedule-complete`, `schedule-cancel`, `schedule-status`. Once any Scheduler activity exists, **new business Outbox actions require** `stage --schedule-id --schedule-owner --schedule-generation`; immutable previously staged actions are still retrievable. The system-only ACK/read lane is exempt. `work-claim` returns these Scheduler fields for linked work, including operator-evidenced handoffs of blocked items.
 
+## Owner message liveness / Issue #31
+
+`Scheduler.dispatch` now refreshes pending `human_action` items and effective message scores before selecting a time slice; waking Muse does not depend on an earlier Tick having synced its latest work. Fresh high-priority Owner messages therefore enter the same dynamic priority queue immediately. Bounded work synchronization considers higher priority entries first; it does not redefine CrewQuay roles or force Owner messages above genuine deadline-critical work.
+
+For a specific urgent message, run `schedule-next --owner WORKER --for-work-id WORK_ID`. This is a **selection guard**: it grants only if the target is pending/due and is the highest eligible activity. If another activity is still running, it returns `granted=false` with preemption advice. If the work is blocked, not due, completed, or outscored, the result includes `hint_status`/`requested_activity` and dispatches nothing else. `schedule-next` itself never claims a Queue lease; next use `work-claim WORK_ID --owner WORKER --authorization-evidence ...` and stage only with the returned Scheduler context.
+
+If a previous activity is live and should yield, its **current lease owner** uses `schedule-checkpoint ... --yield` at a real safe point. If that worker has crashed and the lease expired, a later `schedule-next` recovers the old Scheduler and matching Queue lease atomically, fencing both generations before dispatching again. A stale generation must not `checkpoint`, `complete` or create new Outbox writes; instead inspect `schedule-status` / `schedule-restore`, check already-staged effects by original logical key, and acquire a fresh lease. Never synthesize a dummy checkpoint, replace an Outbox logical key or bypass `StaleLease`.
+
 ## Allowed dependencies
 `persistence.index` shared SQLite transaction schema. Scheduling has no private dependency on Queue, Wakeups, Outbox, or Runtime. Runtime composes it through the public index.
 
