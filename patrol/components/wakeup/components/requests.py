@@ -319,16 +319,23 @@ class Wakeups:
                 if (prior["worker"]!=worker
                         or prior["activity_id"]!=activity_id
                         or prior["wakeup_generation"]!=wakeup_generation
-                        or prior["activity_generation"]!=activity_generation):
-                    raise StaleLease("worker or generation changed; never overwrite receipt")
+                        or activity_generation<prior["activity_generation"]
+                        or (activity_generation>prior["activity_generation"]
+                            and phase!="progress")):
+                    raise StaleLease("worker or generation stale; resumed slice must attest progress")
+                # After a safe-point yield, the same verified worker may
+                # record progress under a *new*, currently live Scheduler
+                # generation, without rewriting the original host wakeup.
                 if prior["status"]=="finished":
                     return {"wakeup_id":ident,"phase":"finished","already_recorded":True}
                 if phase=="started":
                     return {"wakeup_id":ident,"phase":prior["status"],"already_recorded":True}
                 c.execute("""UPDATE wakeup_execution_receipts
-                    SET status=?,updated_at=?,finished_at=?,evidence=?
+                    SET status=?,activity_generation=?,updated_at=?,
+                        finished_at=?,evidence=?
                     WHERE wakeup_id=?""",
-                    (phase,now,now if phase=="finished" else None,payload,ident))
+                    (phase,activity_generation,now,
+                     now if phase=="finished" else None,payload,ident))
             else:
                 if phase!="started":
                     raise ValueError("execution must be started before progress or finish")
