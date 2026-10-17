@@ -2,8 +2,8 @@
 # Reference HATCH Hook, not installed/enabled by this repository.
 # Hook: Light Tick + independent action compensation + fenced Muse wake.
 # Requires prior host approval for credentialed polling and authorized writes.
-# Bounded Hook: light <=21 s, drain <=20 s, idle discovery <=6 s,
-# wake reservation <=8 s. No second timer or cron.
+# Bounded Hook: light <=20 s, bootstrap <=6 s, drain <=18 s,
+# idle discovery <=5 s, wake reservation <=8 s. No second timer or cron.
 set -euo pipefail
 source "${HATCH_HOOK_RUNTIME:?host Hook runtime required}"
 
@@ -21,14 +21,30 @@ if flock -n 9; then
   # No raw stdout/stderr in Hook logs; external content or stack traces could
   # contain secrets. The CLI itself already stores structured run reports.
   TICK_EXIT=0
-  (cd "$REPO" && timeout 21s python3 -m patrol \
+  (cd "$REPO" && timeout 20s python3 -m patrol \
     --config "$CONFIG" --db "$DB" tick --light >/dev/null 2>&1) || TICK_EXIT=$?
   log "phase3 light tick exit=${TICK_EXIT}"
+
+  # Start native CrewQuay deployment verification only when the installed
+  # Git SHA changes or the first authenticated local run is still absent.
+  # The real Agent handles the resulting high-priority Queue work after
+  # wake(), with Scheduler / Outbox fencing; the Hook never POSTs a SYN/ACK.
+  # This is NOT a second timer, and a local run is NOT a Host attestation.
+  BOOTSTRAP_EXIT=0
+  REPO_SHA="$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" || REPO_SHA=""
+  if [[ "$REPO_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    (cd "$REPO" && timeout 6s python3 -m patrol \
+      --config "$CONFIG" --db "$DB" deployment-ensure \
+      --repo-sha "$REPO_SHA" >/dev/null 2>&1) || BOOTSTRAP_EXIT=$?
+  else
+    BOOTSTRAP_EXIT=2
+  fi
+  log "phase7 deployment bootstrap exit=${BOOTSTRAP_EXIT}"
 
   # Pure Python Executor, not a Muse worker. Only verified, authorized actions
   # can POST. An unknown remote result is readback-checked, never blindly resent.
   DRAIN_EXIT=0
-  (cd "$REPO" && timeout 20s python3 -m patrol \
+  (cd "$REPO" && timeout 18s python3 -m patrol \
     --config "$CONFIG" --db "$DB" outbox-drain --once --lane any \
     --limit 3 >/dev/null 2>&1) || DRAIN_EXIT=$?
   log "phase3 executor compensation exit=${DRAIN_EXIT}"
@@ -36,7 +52,7 @@ if flock -n 9; then
   # The CLI requires a verified Agent identity, checks formal work first,
   # and maintains a durable >=30-minute SQLite cadence. GET only; no POST.
   SOCIAL_EXIT=0
-  (cd "$REPO" && timeout 6s python3 -m patrol \
+  (cd "$REPO" && timeout 5s python3 -m patrol \
     --config "$CONFIG" --db "$DB" social-sync --if-idle-due \
     --limit 10 --max-new 3 >/dev/null 2>&1) || SOCIAL_EXIT=$?
   log "phase6 idle discovery exit=${SOCIAL_EXIT}"
