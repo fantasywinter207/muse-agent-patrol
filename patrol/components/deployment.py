@@ -8,7 +8,8 @@ import json
 import re
 import secrets
 from datetime import datetime
-from .persistence.index import canonical, enqueue_tx, new_id
+from .persistence.index import canonical, new_id
+from .queue.index import enqueue_tx
 
 
 def handshake_id(actor, run_id):
