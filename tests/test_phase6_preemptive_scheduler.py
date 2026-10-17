@@ -1,14 +1,18 @@
 """Phase 6.1: deterministic real SQLite scheduler and Outbox fencing tests."""
+import contextlib
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from patrol.components.persistence.index import Database, StaleLease
 from patrol.components.scheduling.index import Scheduler
 from patrol.components.outbox.index import Outbox
 from patrol.components.queue.index import Queue
 from patrol.components.config.index import Config
-from patrol.components.runtime.index import Tick
+from patrol.components.runtime.index import Tick, main
 from patrol.components.wakeup.index import Wakeups
 from patrol.components.promises.index import Promises
 from patrol.components.scheduling.policy.scoring import priority, preemption
@@ -159,6 +163,39 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         self.assertEqual(result["activity"]["id"],registered)
         self.assertEqual(self.db.read("SELECT count(*) AS n FROM schedule_activities "
                                      "WHERE work_id=?",(work,))[0]["n"],1)
+
+    def test_issue31_cli_for_work_id_guard_reports_candidate_without_stealing(self):
+        other=Queue(self.db).enqueue("work:cli-high","human_action",
+                                     {"reason":"urgent"},1000,priority=90)
+        focused=Queue(self.db).enqueue("work:cli-low","human_action",
+                                       {"reason":"operator target"},1001,priority=40)
+        out=io.StringIO()
+        with patch("patrol.components.runtime.composition.cli.time.time",
+                   return_value=1002),contextlib.redirect_stdout(out):
+            code=main(["--db",str(self.db.path),"schedule-next",
+                       "--owner","operator","--for-work-id",focused])
+        self.assertEqual(code,0,out.getvalue())
+        report=json.loads(out.getvalue())
+        self.assertFalse(report["granted"],report)
+        self.assertEqual(report["hint_status"],"outscored_by_other_activity")
+        self.assertEqual(report["requested_work_id"],focused)
+        self.assertEqual(report["candidate"]["work_id"],other)
+
+    def test_issue31_focused_sync_not_starved_by_bounded_priority_scan(self):
+        queue=Queue(self.db)
+        for n in range(501):
+            queue.enqueue("work:bulk-"+str(n),"human_action",
+                          {"reason":"existing urgent backlog"},1000,
+                          priority=90)
+        target=queue.enqueue("work:focused-low","human_action",
+                             {"reason":"diagnose only"},1001,priority=10)
+        result=self.scheduler.dispatch("operator",1002,for_work_id=target)
+        self.assertFalse(result["granted"],result)
+        self.assertEqual(result["hint_status"],"outscored_by_other_activity")
+        self.assertEqual(result["requested_activity"]["work_id"],target)
+        self.assertEqual(self.db.read(
+            "SELECT count(*) AS n FROM schedule_activities WHERE work_id=?",
+            (target,))[0]["n"],1)
 
     def test_deadline_beats_high_social_score_without_fixed_priority_lanes(self):
         self.add("social","social",score=75)
