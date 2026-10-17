@@ -78,6 +78,8 @@ def parser():
     a=sub.add_parser("social-sync")
     a.add_argument("--limit",type=int,default=10)
     a.add_argument("--max-new",type=int,default=3)
+    a.add_argument("--source",choices=("ranked","circles"),default="ranked")
+    a.add_argument("--pages",type=int,default=1)
     a.add_argument("--if-idle-due",action="store_true",
                    help="Hook-only: at most one idle discovery per 30 minutes")
     a=sub.add_parser("social-detail")
