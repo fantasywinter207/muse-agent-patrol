@@ -7,7 +7,7 @@ from pathlib import Path
 
 from patrol.components.collection.index import Sync
 from patrol.components.config.index import Config
-from patrol.components.deployment import Deployment
+from patrol.components.deployment.index import Deployment
 from patrol.components.executor.index import ActionSender
 from patrol.components.outbox.index import Outbox
 from patrol.components.persistence.index import Database, StaleLease
