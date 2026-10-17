@@ -12,7 +12,7 @@ class HostHandoff:
         self.scheduler=Scheduler(db,lease_seconds)
         self.wakeups=Wakeups(db,lease_seconds)
 
-    def prepare(self, owner, now, allow_social=False):
+    def prepare(self, owner, now, allow_social=True):
         """Reserve one due intent and provide bounded, non-content routing hints.
 
         The Hook invokes wake() only after a successful reservation. Its host
