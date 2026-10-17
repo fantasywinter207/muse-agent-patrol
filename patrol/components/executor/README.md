@@ -3,11 +3,13 @@
 ## Purpose
 
 Community resources `community/circle/post` under generic
-`platform_action` are supported only when `allow_community_actions`
-is explicitly true, the action name is explicitly included in
-`allowed_platform_actions`, and the authenticated server catalog and
-authoritative resource scope both match. This does not grant project roles.
-The existing Agent execution exact receipt readback remains required.
+`platform_action` are available without a second client-side social
+switch or manual list of every community action. They still require
+`allow_writes=true`, a matching **authenticated** server action
+registry and resource identity, and current platform-side actor/member
+authorization. This never grants project roles. Formal project actions
+still use `allowed_platform_actions` and `allowed_project_action_ids`;
+all actual effects still require exact durable execution readback.
 
 Deliver previously staged, explicitly authorized actions quickly without running Full Tick or waking a Muse model.
 
