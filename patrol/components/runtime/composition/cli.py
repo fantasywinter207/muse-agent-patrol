@@ -60,6 +60,8 @@ def parser():
     sub.add_parser("doctor")
     sub.add_parser("status")
     sub.add_parser("platform-catalog")
+    a=sub.add_parser("deployment-ensure")
+    a.add_argument("--repo-sha",required=True)
     a=sub.add_parser("deployment-start")
     a.add_argument("--repo-sha",required=True,
                    help="actual installed Patrol commit SHA (7-40 lowercase hex)")
@@ -295,30 +297,38 @@ def main(argv=None):
                 result=migrate_legacy(db,args.directory,now,args.confirm_stopped)
             elif args.command=="backup":
                 result={"backup":db.backup(args.destination),"integrity":"ok"}
-            elif args.command=="deployment-start":
-                if not cfg.allow_writes:
-                    raise ValueError("deployment requires authorized outbound write configuration")
+            elif args.command in ("deployment-start","deployment-ensure"):
+                # Called by the existing HATCH Hook once per installed SHA.
+                # All subsequent turns use local status and never issue a
+                # capability GET or generate duplicate runs/work.
                 bound=db.read("SELECT value FROM meta WHERE key='actor'")
-                if not bound:
-                    raise ValueError("verify local CrewQuay actor before starting a handshake")
-                client=Client(cfg,credential_provider(cfg))
-                reply=client.request("GET","/api/v1/agent/deployment/capabilities")
-                if reply.status in (0,408,429) or reply.status>=500:
-                    result={"status":"deferred","remote_status":reply.status,
-                            "deployment_verified":False,"retry_after":reply.retry_after}
-                elif reply.status in (401,403):
-                    result={"status":"authorization_failed",
-                            "deployment_verified":False}
-                elif (reply.status!=200 or not isinstance(reply.body,dict) or
-                        reply.body.get("supported") is not True or
-                        reply.body.get("protocolVersion")!="1" or
-                        reply.body.get("actorId")!=bound[0]["value"] or
-                        reply.body.get("synAckEventType")!="deployment.syn_ack" or
-                        reply.body.get("platformSenderId")!="crewquay-platform" or
-                        reply.body.get("windowSeconds")!=300):
-                    result=Deployment(db).unsupported(now,args.repo_sha)
+                current=Deployment(db).get() if bound else None
+                if (args.command=="deployment-ensure" and current and
+                        current.get("repo_sha")==args.repo_sha):
+                    result={"status":"already_initialized","deployment":current,
+                            "remote_action_issued":False}
+                elif not bound:
+                    result={"status":"identity_pending","deployment_verified":False}
+                elif not cfg.allow_writes:
+                    result={"status":"authorization_failed","deployment_verified":False}
                 else:
-                    result=Deployment(db).start(now,args.repo_sha)
+                    client=Client(cfg,credential_provider(cfg))
+                    reply=client.request("GET","/api/v1/agent/deployment/capabilities")
+                    if reply.status in (0,408,429) or reply.status>=500:
+                        result={"status":"deferred","remote_status":reply.status,
+                                "deployment_verified":False,"retry_after":reply.retry_after}
+                    elif reply.status in (401,403):
+                        result={"status":"authorization_failed","deployment_verified":False}
+                    elif (reply.status!=200 or not isinstance(reply.body,dict) or
+                            reply.body.get("supported") is not True or
+                            reply.body.get("protocolVersion")!="1" or
+                            reply.body.get("actorId")!=bound[0]["value"] or
+                            reply.body.get("synAckEventType")!="deployment.syn_ack" or
+                            reply.body.get("platformSenderId")!="crewquay-platform" or
+                            reply.body.get("windowSeconds")!=300):
+                        result=Deployment(db).unsupported(now,args.repo_sha)
+                    else:
+                        result=Deployment(db).start(now,args.repo_sha)
             elif args.command=="deployment-status":
                 result=Deployment(db).get(args.id)
             elif args.command=="deployment-reconcile":
