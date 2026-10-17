@@ -27,6 +27,36 @@ class SocialOpportunities:
     def __init__(self, db):
         self.db=db
 
+    def reserve_idle_discovery(self,now,interval=1800):
+        """Durable, cross-Hook cooldown for opt-in idle discovery GETs.
+
+        Record the attempt BEFORE network access, so overlapping hooks and
+        repeated 503/timeout responses cannot create a poll storm.
+        The caller still decides whether to issue the bounded HTTP GET.
+        """
+        if (type(now) not in (int,float) or not math.isfinite(now) or
+                type(interval) is not int or interval<900):
+            raise ValueError("invalid idle discovery window")
+        with self.db.transaction() as c:
+            if c.execute("""SELECT 1 FROM wakeup_requests
+                WHERE source_type IN ('work','promise')
+                  AND status IN ('pending','retry_wait','leased','unknown')
+                  AND next_attempt_at<=? LIMIT 1""",(now,)).fetchone():
+                return False
+            if c.execute("""SELECT 1 FROM schedule_activities a
+                LEFT JOIN work_items w ON w.id=a.work_id
+                WHERE a.status IN ('running','ready','suspended')
+                  AND (a.kind!='work' OR (
+                    w.status IN ('pending','retry_wait') AND w.next_action_at<=?))
+                LIMIT 1""",(now,)).fetchone():
+                return False
+            old=c.execute("SELECT value FROM meta WHERE key='social_discovery_last_at'").fetchone()
+            if old and float(old["value"])+interval>now:
+                return False
+            c.execute("""INSERT INTO meta(key,value) VALUES('social_discovery_last_at',?)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value""",(str(now),))
+            return True
+
     @staticmethod
     def _validate(page,actor):
         if (not isinstance(page,dict) or page.get("protocolVersion")!="1"
