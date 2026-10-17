@@ -30,13 +30,14 @@ replacement scheduler, additional timer, or second wakeup queue.
 
 ## Social handoff
 
-`HostHandoff.prepare(owner,now,allow_social=False)` defaults to work/promise
-only. When explicitly enabled, it may reserve an admitted social wake *only*
-if there is no running Scheduler activity and the highest-priority eligible
-candidate is social. The wake goes through exactly the same durable
-`wakeup_requests` lease and `wakeup-ack` evidence protocol. It neither
-claims a Scheduler time slice nor starts the host. The client-level social
-discovery call is separately gated and throttle-controlled.
+`HostHandoff.prepare(owner,now,allow_social=True)` includes low-priority
+admitted social activity by default **only** if no Scheduler activity is
+running and the highest-priority eligible candidate is social. The same
+durable `wakeup_requests` lease and `wakeup-ack` proof protocol apply.
+No Scheduler time slice is claimed by this call; it neither starts nor
+implicitly authorizes a Muse model. Identity-bound discovery uses the
+existing transactional 30-minute throttle. Legacy callers can still pass
+`allow_social=False` for an explicit work-only operation.
 
 ## Non-responsibilities
 
