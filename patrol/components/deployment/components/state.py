@@ -57,8 +57,14 @@ class Deployment:
             current = c.execute("""SELECT * FROM deployment_runs WHERE actor=?
                 AND state NOT IN ('protocol_verified','expired','failed')
                 ORDER BY created_at DESC LIMIT 1""", (actor,)).fetchone()
-            if current:
+            if current and current["repo_sha"]==repo_sha:
                 return sanitize(current)
+            if current:
+                # Upgrade invalidates the previous protocol attempt, without
+                # deleting any previously staged Outbox intent/evidence.
+                c.execute("""UPDATE deployment_runs SET state='failed',
+                    failure_code='SUPERSEDED_BY_UPGRADE',updated_at=? WHERE id=?""",
+                    (now,current["id"]))
             run_id = "deploy-" + secrets.token_hex(16)
             nonce = secrets.token_hex(16)
             ident = new_id()
