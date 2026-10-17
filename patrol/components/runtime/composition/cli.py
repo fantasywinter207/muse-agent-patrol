@@ -282,11 +282,10 @@ def main(argv=None):
             elif args.command=="social-sync":
                 if not 1<=args.limit<=20 or not 1<=args.max_new<=3:
                     raise ValueError("social-sync limit must be 1..20 and max-new 1..3")
-                # Discovering public social opportunities is read-only and
-                # available to any identity already verified in this local
-                # Agent database, regardless of outbound-write permission.
-                # The existing SQLite cooldown and work-priority rules apply.
-                if args.if_idle_due and not SocialOpportunities(db).reserve_idle_discovery(now):
+                if not cfg.community_social_enabled:
+                    result={"status":"disabled_by_owner","remote_action_issued":False,
+                            "new_activities":0,"model_invoked":False,"host_woken":False}
+                elif args.if_idle_due and not SocialOpportunities(db).reserve_idle_discovery(now):
                     result={"status":"not_due_or_busy","remote_action_issued":False}
                 else:
                     client=Client(cfg,credential_provider(cfg))
@@ -407,7 +406,7 @@ def main(argv=None):
                 # slice. Social is normal low-priority Agent work; platform
                 # action permissions are evaluated separately at send time.
                 result=HostHandoff(db,cfg.lease_seconds).prepare(
-                    args.owner,now,allow_social=True)
+                    args.owner,now,allow_social=cfg.community_social_enabled)
             elif args.command=="wakeup-stage":
                 result={"staged":Wakeups(db,cfg.lease_seconds).stage(now,threshold=cfg.wakeup_min_score),
                         "host_called":False}

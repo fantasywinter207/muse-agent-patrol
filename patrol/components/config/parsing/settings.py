@@ -36,7 +36,14 @@ class Config:
     lease_seconds: int = 120
     allow_writes: bool = False
     actor_id: str = ""
+    # Legacy collector hint only; never a sending permission requirement.
     allowed_chat_ids: list = field(default_factory=list)
+    # Owner-maintained explicit prohibitions; platform authorizes all grants.
+    blocked_chat_ids: list = field(default_factory=list)
+    blocked_contact_ids: list = field(default_factory=list)
+    blocked_social_resources: list = field(default_factory=list)  # "circle:cir_..." etc.
+    blocked_social_actions: list = field(default_factory=list)  # action registry names
+    community_social_enabled: bool = True
     project_ids: list = field(default_factory=list)
     allowed_project_action_ids: list = field(default_factory=list)
     allowed_task_actions: list = field(default_factory=list)
@@ -59,7 +66,8 @@ class Config:
         if self.light_tick_budget_seconds<2:
             raise ValueError("light budget must allow a bounded HTTP request")
         if (type(self.allow_writes) is not bool or
-                type(self.ack_single_enabled) is not bool):
+                type(self.ack_single_enabled) is not bool or
+                type(self.community_social_enabled) is not bool):
             raise ValueError("write flags must be booleans")
         # A message seen on the next idle tick must still be eligible to open attention.
         if self.max_event_age_seconds < self.normal_scan_seconds + 60:
@@ -68,10 +76,14 @@ class Config:
             raise ValueError("request timeout must be below tick budget")
         if self.lease_seconds <= self.tick_budget_seconds:
             raise ValueError("lease must exceed tick budget")
-        for name in ("allowed_chat_ids", "project_ids", "allowed_project_action_ids", "allowed_task_actions", "allowed_platform_actions"):
+        for name in ("allowed_chat_ids", "blocked_chat_ids", "blocked_contact_ids", "blocked_social_resources", "blocked_social_actions", "project_ids", "allowed_project_action_ids", "allowed_task_actions", "allowed_platform_actions"):
             value = getattr(self, name)
             if not isinstance(value, list) or any(not isinstance(v, str) or not v for v in value):
                 raise ValueError("invalid scope list: " + name)
+        if any(v not in ("community:community",) and not
+               (v.startswith(("circle:cir_", "post:post_")) and v.count(":")==1)
+               for v in self.blocked_social_resources):
+            raise ValueError("blocked_social_resources must use community:community, circle:cir_* or post:post_*")
         if set(self.allowed_task_actions)-{"task_claim","task_progress","task_submit","submission_review","project_decision","artifact_upload"}:
             raise ValueError("unsupported allowed_task_actions value")
         if not isinstance(self.ack_chat_map, dict) or any(not isinstance(k, str) or not isinstance(v, list) or any(not isinstance(x, str) for x in v) for k,v in self.ack_chat_map.items()):

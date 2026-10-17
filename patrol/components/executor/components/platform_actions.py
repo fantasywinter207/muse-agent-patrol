@@ -19,11 +19,17 @@ def can_execute(sender,row):
     resource=command["resource"]
     is_community=resource["type"] in ("community","circle","post")
     if is_community:
-        # No community-specific enable switch or per-action client table.
-        # The generic send gate still prevents deployment-time surprise
-        # writes; real Agent authority always comes from CrewQuay.
         if not sender.config.allow_writes:
             return False,"outbound writes not enabled"
+        # The server remains authoritative. Owner denial is the only local
+        # per-social-action policy; no allowlist of permissible actions.
+        if not sender.config.community_social_enabled:
+            return False,"community social activity disabled by Owner"
+        if command["action"] in sender.config.blocked_social_actions:
+            return False,"community action explicitly blocked by Owner"
+        if (resource["type"]+":"+resource["id"]
+                in sender.config.blocked_social_resources):
+            return False,"community resource explicitly blocked by Owner"
         if not command["action"].startswith("community."):
             return False,"non-community action cannot target community resource"
     elif command["action"] not in sender.config.allowed_platform_actions:
@@ -57,6 +63,14 @@ def can_execute(sender,row):
             resolved.body.get("id")!=resource["id"]):
         return False,"resource scope identity mismatch"
     if resource["type"] in ("community","circle","post"):
+        # A circle action may post into the same underlying group chat; do
+        # not allow it to bypass an Owner prohibition on that chat ID.
+        if resource["type"]=="circle":
+            linked_chat=resolved.body.get("chatId")
+            if (not isinstance(linked_chat,str) or not linked_chat):
+                return False,"circle linked chat identity unavailable"
+            if linked_chat in sender.config.blocked_chat_ids:
+                return False,"linked chat explicitly blocked by Owner"
         # A public social directory entry is not permission to write.
         # Identity, current membership and author checks remain enforced
         # by the platform action handler at execution.
@@ -75,9 +89,8 @@ def verify_execution(sender,row):
     # Exact requestId resolves crashed/ambiguous POST even if no response or
     # remote executionId was ever written to SQLite.
     command=row["payload"]
-    allowed,_=can_execute(sender,row)
-    if not allowed:
-        return None
+    # A read-only receipt lookup must remain possible even after the Owner
+    # bans future writes or a resource leaves the registry. Never POST here.
     path="/api/v1/agent/executions/by-request/"+quote(command["requestId"],safe="")
     receipt=sender.client.request("GET",path)
     if receipt.status!=200 or not isinstance(receipt.body,dict):

@@ -33,10 +33,19 @@ class ProtocolAPI:
                 "actions":[{"name":"task.thread.reply","version":"1",
                             "resourceType":"task"},
                            {"name":"task.plan.new-capability","version":"1",
-                            "resourceType":"task"}]})
+                            "resourceType":"task"},
+                           {"name":"community.post.comment","version":"1",
+                            "resourceType":"post"},
+                           {"name":"community.circle.message","version":"1",
+                            "resourceType":"circle"}]})
         if method=="GET" and path.startswith("/api/v1/agent/resources/task/"):
             return Response(200,{"type":"task","id":path.split("/")[-1],
                                  "projectId":"proj"})
+        if method=="GET" and path.startswith("/api/v1/agent/resources/post/"):
+            return Response(200,{"type":"post","id":path.split("/")[-1]})
+        if method=="GET" and path.startswith("/api/v1/agent/resources/circle/"):
+            return Response(200,{"type":"circle","id":path.split("/")[-1],
+                                 "chatId":"chat_circle_attached","joined":True})
         if method=="POST" and path=="/api/v1/agent/actions/execute":
             request_id=payload["requestId"]
             existing=self.committed.get(request_id)
@@ -125,6 +134,64 @@ class GenericAgentProtocolTests(unittest.TestCase):
         self.assertEqual(result["item_status"],"confirmed",result)
         self.assertEqual([x[1] for x in self.client.calls if x[0]=="POST"],
                          ["/api/v1/agent/actions/execute"])
+
+    def test_community_social_uses_registry_without_local_action_allowlist(self):
+        val=envelope(request_id="community-test-111",action="community.post.comment",
+                     project_type="post",resource_id="post_public")
+        ident=self.stage("community-allowed",val)
+        result=self.drain(ident)
+        self.assertEqual(result["item_status"],"confirmed",result)
+        self.assertEqual(len([x for x in self.client.calls if x[0]=="POST"]),1)
+
+    def test_owner_blocks_named_community_action_and_resource(self):
+        for i,denial in enumerate((
+                {"blocked_social_actions":["community.post.comment"]},
+                {"blocked_social_resources":["post:post_public"]},
+                {"community_social_enabled":False})):
+            with self.subTest(denial=denial):
+                val=envelope(request_id="community-deny-"+str(i)+"-111",
+                    action="community.post.comment",project_type="post",
+                    resource_id="post_public")
+                ident=self.stage("community-deny-"+str(i),val)
+                cfg=Config(database=str(self.db.path),allow_writes=True,**denial)
+                self.client.calls.clear()
+                report=ActionSender(self.db,cfg,self.client,clock=lambda:1000).drain_once(1,ident)
+                self.assertEqual(report["blocked"],1,report)
+                self.assertFalse(any(x[0]=="POST" for x in self.client.calls))
+
+    def test_circle_message_owner_resource_ban_cannot_bypass_chat_policy(self):
+        val=envelope(request_id="circle-denied-111",action="community.circle.message",
+                     project_type="circle",resource_id="cir_private")
+        ident=self.stage("circle-denied",val)
+        cfg=Config(database=str(self.db.path),allow_writes=True,
+                   blocked_social_resources=["circle:cir_private"])
+        result=ActionSender(self.db,cfg,self.client,clock=lambda:1000).drain_once(1,ident)
+        self.assertEqual(result["blocked"],1,result)
+        self.assertFalse(any(x[0]=="POST" for x in self.client.calls))
+
+    def test_circle_linked_chat_denial_blocks_social_action(self):
+        val=envelope(request_id="circle-linked-111",action="community.circle.message",
+                     project_type="circle",resource_id="cir_allowed")
+        ident=self.stage("circle-linked-denied",val)
+        cfg=Config(database=str(self.db.path),allow_writes=True,
+                   blocked_chat_ids=["chat_circle_attached"])
+        report=ActionSender(self.db,cfg,self.client,clock=lambda:1000).drain_once(1,ident)
+        self.assertEqual(report["blocked"],1,report)
+        self.assertFalse(any(x[0]=="POST" for x in self.client.calls))
+
+    def test_social_ban_does_not_prevent_readonly_reconcile_of_previous_action(self):
+        val=envelope(request_id="community-old-111",action="community.post.comment",
+                     project_type="post",resource_id="post_public")
+        ident=self.stage("community-before-ban",val)
+        self.client.request("POST","/api/v1/agent/actions/execute",val,"idem")
+        self.client.calls.clear()
+        with self.db.transaction() as c:
+            c.execute("UPDATE outbox SET status='unknown',remote_id=NULL WHERE id=?",(ident,))
+        cfg=Config(database=str(self.db.path),allow_writes=True,
+                   blocked_social_resources=["post:post_public"])
+        report=ActionSender(self.db,cfg,self.client,clock=lambda:1000).drain_once(1,ident)
+        self.assertEqual(report["item_status"],"confirmed",report)
+        self.assertFalse(any(x[0]=="POST" for x in self.client.calls))
 
     def test_payload_rejects_resource_mismatch_and_unstable_id(self):
         with self.assertRaises(ValueError):

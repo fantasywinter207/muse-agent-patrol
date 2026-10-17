@@ -28,11 +28,84 @@ class ActionSender:
         self.attention=Attention(db,config)
         self.actor=None
 
+    def _chat_allowed(self, target):
+        """Resolve current CrewQuay chat authority; Owner denials always win.
+
+        Chat IDs and local allowlists do not establish membership or permission.
+        Do not trust a chat_ prefix, a sender's requested target or stale
+        synced conversation metadata as proof of current server grants.
+        """
+        if target in self.config.blocked_chat_ids:
+            return False,"chat explicitly blocked by Owner"
+        if self.client is None:
+            return False,"chat authorization lookup unavailable"
+        try:
+            response=self.client.request("GET","/api/v1/chats/"+quote(target,safe=""))
+        except Exception:
+            return False,"chat authorization lookup unavailable"
+        if response.status!=200 or not isinstance(response.body,dict):
+            return False,"chat not currently authorized by platform"
+        detail=response.body
+        kind=detail.get("kind")
+        if (detail.get("conversationId")!=target
+                or kind not in ("direct","group","community_hub","project")
+                or detail.get("canSend") is not True
+                or detail.get("isObserver") is True):
+            return False,"chat not currently writable by platform"
+        if kind=="community_hub":
+            if target!="community_hub":
+                return False,"hub conversation identity mismatch"
+            if not self.config.community_social_enabled:
+                return False,"community social activity disabled by Owner"
+        elif kind=="direct":
+            if type(detail.get("memberCount")) is not int or detail["memberCount"]!=2:
+                return False,"direct conversation must have two members"
+            # When the Owner blocks a peer, every present and future DM with
+            # that peer must be denied, including those not named in a chat ID
+            # denylist. Require bounded, well-formed member identity evidence.
+            if self.config.blocked_contact_ids:
+                members=detail.get("members")
+                if not isinstance(members,list) or len(members)!=2 or not all(
+                        isinstance(m,dict) and isinstance(m.get("id"),str)
+                        for m in members):
+                    return False,"direct participants unavailable for Owner policy"
+                if self.actor not in [m["id"] for m in members]:
+                    return False,"direct actor not a current participant"
+                if any(m["id"] in self.config.blocked_contact_ids for m in members):
+                    return False,"direct contact explicitly blocked by Owner"
+        elif kind=="group":
+            # A community circle is backed by a normal group conversation.
+            # Map the Owner's forbidden circle IDs to their authoritative
+            # chatId, so a group send cannot bypass the circle action policy.
+            for key in self.config.blocked_social_resources:
+                if not key.startswith("circle:"):
+                    continue
+                circle_id=key[len("circle:"):]
+                try:
+                    found=self.client.request("GET",
+                        "/api/v1/agent/resources/circle/"+
+                        quote(circle_id,safe=""))
+                except Exception:
+                    return False,"blocked circle membership lookup unavailable"
+                if (found.status!=200 or not isinstance(found.body,dict)
+                        or found.body.get("type")!="circle"
+                        or found.body.get("id")!=circle_id
+                        or not isinstance(found.body.get("chatId"),str)):
+                    return False,"blocked circle chat mapping unavailable"
+                if found.body["chatId"]==target:
+                    return False,"linked circle explicitly blocked by Owner"
+        elif kind=="project":
+            if detail.get("projectId") not in self.config.allowed_project_action_ids:
+                return False,"project chat outside approved formal project scope"
+        return True,None
+
     def can_send(self,row):
         if not self.config.allow_writes or not self.actor or self.actor!=row["actor"]:
             return False,"explicit write authorization and current matching actor required"
-        if row["action"] in ("send","read") and row["target"] not in self.config.allowed_chat_ids:
-            return False,"chat outside explicit authorized scope"
+        if row["action"] in ("send","read"):
+            allowed, reason=self._chat_allowed(row["target"])
+            if not allowed:
+                return False,reason
         if row["action"] in ("project_message","task_thread_reply","room_message"):
             # Project writes require an independent explicit allowlist. Read
             # scopes (project_ids) MUST NOT implicitly grant write privileges.
@@ -102,10 +175,9 @@ class ActionSender:
         return self.client.request("POST",path,payload,row["idem_key"])
 
     def verify(self,row,response):
-        # A read-only unknown-result reconciliation must still respect the
-        # authorized chat scope, even though it never sends a POST.
-        if row["action"]=="send" and row["target"] not in self.config.allowed_chat_ids:
-            return None
+        # Reconciling a previously submitted effect is read-only. Owner
+        # prohibitions prevent NEW writes but must not erase evidence of a
+        # possible earlier write; the server still checks GET visibility.
         if row["action"] in ("project_message","task_thread_reply","room_message"):
             allowed,_=self.can_send(row)
             if not allowed:
