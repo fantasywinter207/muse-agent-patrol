@@ -109,9 +109,12 @@ class Scheduler:
                 score=(row["message_score"] if row["event_source"]=="messages"
                        and row["message_score"] is not None else row["priority"])
                 score=min(100,max(0,score))
+                # A generic low-score event's suggested start_by (often
+                # now+180s) is not a formal delivery deadline. Treating it
+                # as EDF urgency turns stale events into false emergencies.
                 deadline=(row["promise_due"] if row["promise_due"] is not None else
                           row["due_at"] if row["due_at"] is not None else
-                          row["start_by"])
+                          row["start_by"] if score>=70 else None)
                 existing=c.execute("SELECT id,status FROM schedule_activities WHERE logical_key=?",
                                    (key,)).fetchone()
                 if existing:
