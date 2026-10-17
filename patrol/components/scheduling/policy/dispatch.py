@@ -155,6 +155,16 @@ class Scheduler:
         if not active or active["lease_until"]>now:
             return 0
         self._charge(c,active,now)
+        # Scheduler and local work are separate leases. A crashed Scheduler
+        # must fence the matching Queue lease as well, otherwise a resumed
+        # activity can remain unclaimable until a later Queue tick.
+        if active["work_id"]:
+            c.execute("""UPDATE work_items SET status='pending',
+                lease_owner=NULL,lease_until=NULL,
+                lease_version=lease_version+1,next_action_at=?,
+                block_reason='scheduler lease expired; reconcile Outbox'
+                WHERE id=? AND status='running' AND lease_owner=?""",
+                (now,active["work_id"],active["lease_owner"]))
         c.execute("""UPDATE schedule_activities SET status='suspended',
             lease_owner=NULL,lease_until=NULL,slice_until=NULL,
             lease_version=lease_version+1,ready_since=?,last_updated=?,
@@ -168,17 +178,24 @@ class Scheduler:
         contenders=self._ready(c,now)
         best=self._best(contenders,now)
         mode=preemption(current,best,now) if current else None
-        if current and mode and mutate and not current["preempt_requested"]:
-            c.execute("""UPDATE schedule_activities
-                SET preempt_requested=1,preempt_mode=?,preempt_reason=?,
-                    last_updated=? WHERE id=? AND status='running'""",
-                (mode,"a higher-value eligible activity is ready",now,current["id"]))
-            current=self._current(c)
+        if current and mutate:
+            # A request is not a latched cancellation. Withdraw it if the
+            # challenger disappeared (or no longer clears hysteresis).
+            if mode and (not current["preempt_requested"] or current["preempt_mode"]!=mode):
+                c.execute("""UPDATE schedule_activities
+                    SET preempt_requested=1,preempt_mode=?,preempt_reason=?,
+                        last_updated=? WHERE id=? AND status='running'""",
+                    (mode,"a higher-value eligible activity is ready",now,current["id"]))
+                current=self._current(c)
+            elif not mode and current["preempt_requested"]:
+                c.execute("""UPDATE schedule_activities SET preempt_requested=0,
+                    preempt_mode=NULL,preempt_reason=NULL,last_updated=?
+                    WHERE id=? AND status='running'""",(now,current["id"]))
+                current=self._current(c)
         return {"running":self._public(current,now),
                 "candidate":self._public(best,now),
-                "preemption":current["preempt_mode"] if current and current["preempt_requested"] else mode,
-                "advice":"checkpoint_at_safe_point" if current and
-                         (current["preempt_requested"] or mode) else
+                "preemption":mode,
+                "advice":"checkpoint_at_safe_point" if current and mode else
                          "continue" if current else "ready_to_dispatch" if best else "idle",
                 "remote_side_effects":"not managed by scheduler"}
 
@@ -251,8 +268,23 @@ class Scheduler:
                                (ident,)).fetchone())
             contenders=self._best(self._ready(c,now),now)
             mode=preemption(row,contenders,now)
-            suspended=bool(voluntary or row["preempt_requested"] or mode)
+            # Re-evaluate at the actual safe point. A withdrawn or completed
+            # challenger must not force an obsolete yield.
+            suspended=bool(voluntary or mode)
             if suspended:
+                if row["work_id"]:
+                    # Release only the work lease owned by this scheduler
+                    # worker. A different live owner is a conflicting claim.
+                    work=c.execute("""SELECT status,lease_owner,lease_until
+                        FROM work_items WHERE id=?""",(row["work_id"],)).fetchone()
+                    if work and work["status"]=="running":
+                        if work["lease_owner"]!=owner and work["lease_until"]>now:
+                            raise StaleLease("linked local work is leased to another owner")
+                        c.execute("""UPDATE work_items SET status='pending',
+                            lease_owner=NULL,lease_until=NULL,
+                            lease_version=lease_version+1,next_action_at=?,
+                            block_reason='checkpoint yielded; reconcile Outbox'
+                            WHERE id=? AND status='running'""",(now,row["work_id"]))
                 c.execute("""UPDATE schedule_activities SET
                     status='suspended',checkpoint=?,lease_owner=NULL,
                     lease_until=NULL,slice_until=NULL,
@@ -269,7 +301,8 @@ class Scheduler:
                 next_slice=(row["slice_until"] if now<row["slice_until"]
                     else now+min(quantum(row["weight"]),self.lease_seconds-1.0))
                 c.execute("""UPDATE schedule_activities SET checkpoint=?,
-                    lease_until=?,slice_until=?,last_updated=?
+                    lease_until=?,slice_until=?,preempt_requested=0,
+                    preempt_mode=NULL,preempt_reason=NULL,last_updated=?
                     WHERE id=?""",
                     (canonical(data),now+self.lease_seconds,
                      next_slice,now,ident))
