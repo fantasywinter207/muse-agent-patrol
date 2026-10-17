@@ -32,9 +32,9 @@ class Wakeups:
             for w in works:
                 # Use the same dynamic deadline/fairness policy as Scheduler;
                 # a low base score can become urgent near its real deadline.
-                effective=(activity_priority(w,now)
-                           if w["activity_status"] in ("ready","suspended")
-                           else float(w["priority"]))
+                effective=max(float(w["priority"]),activity_priority(w,now)) if (
+                    w["activity_status"] in ("ready","suspended")
+                ) else float(w["priority"])
                 if effective<threshold:
                     continue
                 effective=min(100,max(0,int(round(effective))))
