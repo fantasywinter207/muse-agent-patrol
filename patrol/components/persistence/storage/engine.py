@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS message_receipts(
 
 CREATE TABLE IF NOT EXISTS wakeup_requests(
  id TEXT PRIMARY KEY, logical_key TEXT NOT NULL UNIQUE,
- source_type TEXT NOT NULL CHECK(source_type IN ('work','promise')),
+ source_type TEXT NOT NULL CHECK(source_type IN ('work','promise','social')),
  source_id TEXT NOT NULL, priority INTEGER NOT NULL CHECK(priority BETWEEN 0 AND 100),
  reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
  created_at REAL NOT NULL, next_attempt_at REAL NOT NULL,
@@ -183,9 +183,42 @@ class Database:
                 raise RuntimeError("requested journal mode unavailable")
             c.executescript(SCHEMA)
             row = c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-            if row and row[0] != "1":
+            if row and row[0] not in ("1","2"):
                 raise RuntimeError("unsupported database schema")
-            c.execute("INSERT INTO meta(key,value) VALUES('schema_version','1') ON CONFLICT(key) DO NOTHING")
+            # Existing installations have v1 wakeup_requests with a SQLite
+            # CHECK limited to work/promise. Rebuild ONLY that table and its
+            # index in one transaction; preserve every row and lease receipt.
+            ddl=c.execute("SELECT sql FROM sqlite_master WHERE type='table' "
+                          "AND name='wakeup_requests'").fetchone()[0]
+            if "'social'" not in ddl:
+                c.execute("BEGIN IMMEDIATE")
+                try:
+                    c.execute("""CREATE TABLE wakeup_requests_v2(
+                        id TEXT PRIMARY KEY, logical_key TEXT NOT NULL UNIQUE,
+                        source_type TEXT NOT NULL CHECK(source_type IN ('work','promise','social')),
+                        source_id TEXT NOT NULL,priority INTEGER NOT NULL
+                        CHECK(priority BETWEEN 0 AND 100),
+                        reason TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',
+                        created_at REAL NOT NULL,next_attempt_at REAL NOT NULL,
+                        lease_owner TEXT,lease_version INTEGER NOT NULL DEFAULT 0,
+                        lease_until REAL,attempts INTEGER NOT NULL DEFAULT 0,
+                        dispatch_evidence TEXT,confirmed_at REAL)""")
+                    columns=("id,logical_key,source_type,source_id,priority,reason,"
+                             "status,created_at,next_attempt_at,lease_owner,"
+                             "lease_version,lease_until,attempts,dispatch_evidence,"
+                             "confirmed_at")
+                    c.execute("INSERT INTO wakeup_requests_v2("+columns+") "
+                              "SELECT "+columns+" FROM wakeup_requests")
+                    c.execute("DROP TABLE wakeup_requests")
+                    c.execute("ALTER TABLE wakeup_requests_v2 RENAME TO wakeup_requests")
+                    c.execute("CREATE INDEX wakeup_due ON wakeup_requests"
+                              "(status,next_attempt_at,priority)")
+                    c.commit()
+                except BaseException:
+                    c.rollback()
+                    raise
+            c.execute("INSERT INTO meta(key,value) VALUES('schema_version','2') "
+                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
         if os.name == "posix":
             os.chmod(self.path, 0o600)
 
