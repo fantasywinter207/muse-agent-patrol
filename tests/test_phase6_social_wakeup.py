@@ -100,9 +100,24 @@ class SocialWakeTests(unittest.TestCase):
         self.assertEqual(retry["wakeup_id"],first["wakeup_id"])
         self.assertEqual(retry["lease_version"],first["lease_version"]+1)
 
+    def test_social_wake_follows_exact_scheduler_candidate(self):
+        first=self.add_social("post_first")
+        second=self.add_social("post_other")
+        # A stale wakeup prepared for a different activity cannot stand in
+        # for the Scheduler's selected activity ID.
+        self.assertEqual(self.wakeup.stage_social(1001,second),1)
+        decision=self.scheduler.assess(1002)["candidate"]["id"]
+        if decision!=second:
+            self.assertIsNone(self.wakeup.claim_next(
+                "host",1002,allow_social=True,social_activity_id=decision))
+        else:
+            # No social wakeup may be claimed for the other activity.
+            self.assertIsNone(self.wakeup.claim_next(
+                "host",1002,allow_social=True,social_activity_id=first))
+
     def test_completed_social_before_host_claim_is_retired(self):
         activity=self.add_social("post_finished")
-        self.assertEqual(self.wakeup.stage_social(1000),1)
+        self.assertEqual(self.wakeup.stage_social(1000,activity),1)
         with self.db.transaction() as c:
             c.execute("UPDATE schedule_activities SET status='completed' WHERE id=?",(activity,))
         reserved=self.wakeup.claim_next("host",1002,allow_social=True)
