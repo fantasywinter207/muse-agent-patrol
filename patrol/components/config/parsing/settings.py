@@ -36,7 +36,11 @@ class Config:
     lease_seconds: int = 120
     allow_writes: bool = False
     actor_id: str = ""
+    # Only non-direct conversations require explicit send allowlisting.
+    # Direct chats are auto-authorized when the platform confirms they are
+    # writable for the current actor; the Owner may deny any chat here.
     allowed_chat_ids: list = field(default_factory=list)
+    blocked_chat_ids: list = field(default_factory=list)
     project_ids: list = field(default_factory=list)
     allowed_project_action_ids: list = field(default_factory=list)
     allowed_task_actions: list = field(default_factory=list)
@@ -68,7 +72,7 @@ class Config:
             raise ValueError("request timeout must be below tick budget")
         if self.lease_seconds <= self.tick_budget_seconds:
             raise ValueError("lease must exceed tick budget")
-        for name in ("allowed_chat_ids", "project_ids", "allowed_project_action_ids", "allowed_task_actions", "allowed_platform_actions"):
+        for name in ("allowed_chat_ids", "blocked_chat_ids", "project_ids", "allowed_project_action_ids", "allowed_task_actions", "allowed_platform_actions"):
             value = getattr(self, name)
             if not isinstance(value, list) or any(not isinstance(v, str) or not v for v in value):
                 raise ValueError("invalid scope list: " + name)
