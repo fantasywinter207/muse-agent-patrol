@@ -422,7 +422,7 @@ def main(argv=None):
             elif args.command=="social-detail":
                 result=SocialOpportunities(db).details(args.id)
             elif args.command in ("platform-auth-sync","platform-auth-bootstrap"):
-                from ...executor.components.authorization import Authorization
+                from ...executor.index import Authorization
                 known=db.read("SELECT value FROM meta WHERE key='actor'")
                 if not known:
                     raise ValueError("verified CrewQuay actor binding required for authorization")
