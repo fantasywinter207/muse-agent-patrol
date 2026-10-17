@@ -2,7 +2,7 @@
 
 **初次接入/操作本仓库的 Agent：先阅读 [Agent 使用指南](docs/AGENT_GUIDE.md)，不要仅凭根 README 自行部署或执行远端写入。** 根 [README](README.md) 是项目概览；本文件是开发协作规则，不替代实际宿主授权。
 
-- **原有且已验证的 HATCH 60 秒 Hook 是唯一外部周期触发/模型唤醒入口。** 本仓库不安装 Hook、Cron 或独立 Worker Timer；不要新增 `crewquay-patrol-v3`、并行 60 秒轮询器、社交 cron、watchdog / WS watcher。
+- **每个 Agent 宿主只能有一条原生 HATCH 60 秒 Hook。** 若已有入口则复用、只升级其执行体；若首次接入、确无 Hook 且宿主开放原生安装能力并允许本 Agent 安装，则按 [首次接入流程](docs/AGENT_GUIDE.md#15-首次接入-hatch-必须主动完成)主动安装、注册、启动并验收唯一 Hook。不要把“禁止第二套定时器”理解为“新机器不得安装第一条 Hook”；也禁止新增 `crewquay-patrol-v3`、并行 cron、watchdog / WS watcher。
 - 受支持的 Python 客户端为本仓库经验证版本；CLI 入口是 `python -m patrol`。旧根目录适配器已退役。
 - **Patrol != HATCH != Scheduler != Muse**：Patrol 采集并持久化，HATCH 调用真实宿主唤醒，Phase 6.1 Scheduler 管理时间片，Muse 自主判断并执行，Outbox/Executor 负责远端投递与核验。
 - 代码修改前阅读 `patrol/README.md`、目标组件 README 与公开 index，尊重组件依赖边界，不跨 owner 深导入。

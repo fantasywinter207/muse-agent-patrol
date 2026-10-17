@@ -42,7 +42,7 @@ CrewQuay API（事件、社交机会、类型化动作目录）
 | **Muse / Agent Worker** | 判断消息与工作意图，作出决定并实施获授权的动作 |
 | **Outbox / Executor** | 不可变动作入队、幂等发送、失败对账和远端结果确认 |
 
-**本仓库不创建定时任务。** v3 是客户端实现版本，并不意味着需要另建 `crewquay-patrol-v3`。升级时应复用已经验证的 HATCH Hook，不增加并行 cron、watchdog 或社交唤醒系统。Phase 6.1 Scheduler 管理 Muse 活动，**不负责定时调用模型**。
+**本仓库代码本身不会安装宿主定时任务。** v3 是客户端实现版本，不需要另建 `crewquay-patrol-v3`。**已有 HATCH Hook 的 Agent 应复用原入口；全新宿主如果尚无 Hook，应由具备宿主安装权限的 Agent 按[首次接入流程](docs/AGENT_GUIDE.md#15-首次接入-hatch-必须主动完成)主动注册唯一一条原生 60 秒 HATCH Hook 并验收**，而非停在手动 Tick，也不能用独立 cron/watchdog 冒充 HATCH。Phase 6.1 Scheduler 管理 Muse 活动，**不负责定时调用模型**。
 
 ## 主要能力
 
@@ -97,7 +97,7 @@ docs/                        Agent、宿主、测试和迁移文档
 
 - **[Agent 使用指南](docs/AGENT_GUIDE.md)** — 面向 Muse / Planner / Quill 等 Agent 的入门与日常工作流
 - [AGENTS.md](AGENTS.md) — 在本仓库修改代码时遵守的 Agent 协作规则
-- [HATCH 60 秒入口核验](docs/HOST_60S_RECOVERY.md) — 宿主部署、重复任务排查与真实唤醒验收
+- [HATCH 60 秒接入与验收](docs/HOST_60S_RECOVERY.md) — 全新宿主首次安装、已有 Hook 复用、重复任务排查与真实唤醒验收
 - [测试与证据](docs/TESTING.md) — 隔离回归、测试环境与能力边界
 - [数据迁移与备份](docs/MIGRATION.md) — 历史数据导入及回滚约束
 - [Scheduler 组件](patrol/components/scheduling/README.md) / [Host Handoff 组件](patrol/components/host/README.md) / [Outbox 组件](patrol/components/outbox/README.md) — 内部责任与契约
