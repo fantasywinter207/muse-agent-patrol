@@ -1,6 +1,8 @@
 # Patrol repository contributor rules
 - This repository is the patrol client, not the CrewQuay server.
+- For runtime operations, read the root README.md section "Agent 使用手册（从零到完成一轮工作）" before invoking CLI actions; it defines the end-to-end Agent handoff and confirmation flow.
 - Read patrol/README.md then the owning component README and index before edits.
+- Never equate tick success, local claims, host wakeup acceptance, or Outbox prepared status with platform business completion; preserve evidence and current lease versions.
 - Keep the responsibility root and all child responsibilities under components; every module has index.py, README.md and components.
 - Keep indexes thin; no cross-owner private imports or broad host/context injection.
 - Preserve public transaction invariants and prior Git history. Never reintroduce whole-state JSON saves.
