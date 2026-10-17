@@ -474,5 +474,54 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         self.assertIsNone(preemption(running,challenger,1000))
 
 
+    def test_versioned_checkpoint_restores_progress_and_inspects_outbox(self):
+        task=self.add("versioned-context","research",now=1000,score=55)
+        running=self.scheduler.dispatch("muse",1001)["activity"]
+        guard={"id":task,"owner":"muse","generation":running["lease_version"]}
+        outbox_id=Outbox(self.db).stage("restore-intent","muse","send","chat",
+                                      {"content":"already drafted"},1002,
+                                      schedule_context=guard)
+        checkpoint={"schema_version":1,"goal":"finish research",
+                    "phase":"draft","completed_steps":["verified topic"],
+                    "next_actions":["review source"],"decisions":["avoid duplicates"],
+                    "resource_refs":[{"type":"task","id":"tsk_123"}],
+                    "pending_outbox_ids":[outbox_id],
+                    "source_task_version":2,"saved_at":1003}
+        self.scheduler.checkpoint(task,"muse",running["lease_version"],1003,
+                                  checkpoint,voluntary=True)
+        pack=self.scheduler.restore(task,1004)
+        self.assertEqual(pack["checkpoint_format"],"v1")
+        self.assertEqual(pack["checkpoint"]["completed_steps"],["verified topic"])
+        self.assertTrue(pack["requires_outbox_reconciliation"])
+        self.assertEqual(pack["outbox_receipts"][0]["status"],"prepared")
+        self.assertFalse(pack["side_effects_executed"])
+        self.assertFalse(pack["model_state_restored"])
+        with self.db.transaction() as cur:
+            cur.execute("UPDATE outbox SET status='confirmed' WHERE id=?",(outbox_id,))
+        self.assertFalse(self.scheduler.restore(task,1005)["requires_outbox_reconciliation"])
+
+    def test_versioned_checkpoint_rejects_invalid_ids_and_untrusted_structure(self):
+        task=self.add("invalid-context","maintenance",now=1000)
+        running=self.scheduler.dispatch("muse",1000)["activity"]
+        base={"schema_version":1,"goal":"continue","phase":"analysis",
+              "completed_steps":[],"next_actions":[],"decisions":[],
+              "resource_refs":[],"pending_outbox_ids":[],
+              "source_task_version":None,"saved_at":1001}
+        for bad in (
+            dict(base, schema_version=99),
+            dict(base, resource_refs=[{"type":"task","id":"injected instructions with spaces"}]),
+            dict(base, pending_outbox_ids=["duplicate","duplicate"]),
+            dict(base, saved_at=float("nan")),
+            dict(base, source_task_version=-1),
+            dict(base, unexpected="must fail"),
+        ):
+            with self.assertRaises(ValueError):
+                self.scheduler.checkpoint(task,"muse",running["lease_version"],1001,bad)
+        self.assertIsNone(self.scheduler.restore(task,1002)["checkpoint"])
+        self.scheduler.checkpoint(task,"muse",running["lease_version"],1003,
+                                  {"legacy_step":"still valid"})
+        self.assertEqual(self.scheduler.restore(task,1004)["checkpoint_format"],"legacy")
+
+
 if __name__=="__main__":
     unittest.main()
