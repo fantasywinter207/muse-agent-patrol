@@ -1,6 +1,14 @@
 # Executor — authorization and remote delivery boundary
 
 ## Purpose
+
+Community resources `community/circle/post` under generic
+`platform_action` are supported only when `allow_community_actions`
+is explicitly true, the action name is explicitly included in
+`allowed_platform_actions`, and the authenticated server catalog and
+authoritative resource scope both match. This does not grant project roles.
+The existing Agent execution exact receipt readback remains required.
+
 Deliver previously staged, explicitly authorized actions quickly without running Full Tick or waking a Muse model.
 
 ## Responsibilities
