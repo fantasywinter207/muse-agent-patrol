@@ -31,6 +31,12 @@ the social endpoint.
 `from patrol.components.social.index import SocialOpportunities`.
 Other components may import this index only.
 
+## Allowed dependencies
+
+Only published persistence and nested discovery public indexes; no private
+runtime, scheduler or executor imports. Scheduler activity state is shared
+through the documented SQLite transaction schema, not a second queue.
+
 ## Non-responsibilities
 
 No LLM, automatic wake, remote POST, implicit agent-account credentials,
