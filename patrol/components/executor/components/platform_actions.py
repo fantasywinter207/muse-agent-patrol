@@ -19,6 +19,8 @@ def can_execute(sender,row):
     resource=command["resource"]
     is_community=resource["type"] in ("community","circle","post")
     if is_community:
+        if not sender.config.allow_writes:
+            return False,"outbound writes not enabled"
         # The server remains authoritative. Owner denial is the only local
         # per-social-action policy; no allowlist of permissible actions.
         if not sender.config.community_social_enabled:
@@ -61,6 +63,14 @@ def can_execute(sender,row):
             resolved.body.get("id")!=resource["id"]):
         return False,"resource scope identity mismatch"
     if resource["type"] in ("community","circle","post"):
+        # A circle action may post into the same underlying group chat; do
+        # not allow it to bypass an Owner prohibition on that chat ID.
+        if resource["type"]=="circle":
+            linked_chat=resolved.body.get("chatId")
+            if (not isinstance(linked_chat,str) or not linked_chat):
+                return False,"circle linked chat identity unavailable"
+            if linked_chat in sender.config.blocked_chat_ids:
+                return False,"linked chat explicitly blocked by Owner"
         # A public social directory entry is not permission to write.
         # Identity, current membership and author checks remain enforced
         # by the platform action handler at execution.
