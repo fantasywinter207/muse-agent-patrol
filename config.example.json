@@ -14,6 +14,7 @@
   "allow_writes": false,
   "actor_id": "",
   "allowed_chat_ids": [],
+  "blocked_chat_ids": [],
   "project_ids": [],
   "allowed_project_action_ids": [],
   "allowed_task_actions": [],
