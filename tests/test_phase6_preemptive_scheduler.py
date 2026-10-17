@@ -9,6 +9,7 @@ from patrol.components.outbox.index import Outbox
 from patrol.components.queue.index import Queue
 from patrol.components.config.index import Config
 from patrol.components.runtime.index import Tick
+from patrol.components.wakeup.index import Wakeups
 
 
 class PreemptiveSchedulerTests(unittest.TestCase):
@@ -397,6 +398,26 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         self.assertFalse(continued["suspended"])
         self.assertFalse(continued["activity"]["preempt_requested"])
         self.assertEqual(self.scheduler.reconcile(1005)["decision"]["advice"],"continue")
+
+
+    def test_deadline_escalation_triggers_host_wakeup_for_low_base_work(self):
+        work=Queue(self.db).enqueue("human:deadline-wakeup","human_action",
+                                    {"reason":"due soon"},1000,priority=15,
+                                    due_at=1010)
+        self.scheduler.sync_work(1000)
+        count=Wakeups(self.db).stage(1000,threshold=70)
+        self.assertEqual(count,1)
+        result=self.db.read("""SELECT priority,source_id FROM wakeup_requests
+            WHERE source_type='work'""")[0]
+        self.assertEqual(result["source_id"],work)
+        self.assertGreaterEqual(result["priority"],70)
+
+    def test_distant_low_priority_work_does_not_wake_host_early(self):
+        Queue(self.db).enqueue("human:distant","human_action",
+                               {"reason":"not due"},1000,priority=15,
+                               due_at=1000+7200)
+        self.scheduler.sync_work(1000)
+        self.assertEqual(Wakeups(self.db).stage(1000,threshold=70),0)
 
 
 if __name__=="__main__":
