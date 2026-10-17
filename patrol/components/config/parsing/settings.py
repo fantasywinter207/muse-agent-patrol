@@ -28,6 +28,9 @@ class Config:
     light_max_requests: int = 8
     light_tick_budget_seconds: int = 20
     light_max_pages_per_source: int = 1
+    # Live event feed rejects >=10 per page on the current deployment.
+    # Keep the page size independent of the number of pages per tick.
+    light_events_page_size: int = 5
     max_light_chats: int = 4
     wakeup_min_score: int = 70
     lease_seconds: int = 120
@@ -50,6 +53,9 @@ class Config:
                     raise ValueError("invalid positive integer config: " + name)
         if type(self.wakeup_min_score) is not int or not 0<=self.wakeup_min_score<=100:
             raise ValueError("wakeup score must be an integer 0..100")
+        if (type(self.light_events_page_size) is not int or
+                not 1<=self.light_events_page_size<=100):
+            raise ValueError("light_events_page_size must be 1..100")
         if self.light_tick_budget_seconds<2:
             raise ValueError("light budget must allow a bounded HTTP request")
         if (type(self.allow_writes) is not bool or

@@ -27,3 +27,14 @@ When an upstream REST page returns a malformed, regressive, or non-advancing cur
 ## Phase 5 Agent Event Feed
 
 `Collector.agent_events(now)` only calls `GET /api/v1/agent/events` with the server-owned recipient cursor, stable `streamId`, bounded page size and a pinned `to` until the batch is terminal. It uses independent `sync_cursors(source='agent_events',scope='global')`; the legacy Full Tick `events` cursor is untouched. `Sync.page` persists each authorized normalized message, immutable first-receipt freshness, baseline score, local inspector, event pointer and feed cursor inside one SQLite transaction. Failed, malformed, redacted, expired or inconsistent events must not be inferred from polling chat history. No event stream reset, watermark jump or secret-bearing log is permitted after 410/cursor regression/context failure.
+
+## Phase 5 Light Tick production page size
+
+The bounded recipient-scoped `GET /api/v1/agent/events` uses
+`Config.light_events_page_size`, default 5, because production testing
+observed connections closing for `limit>=10` while `limit=5` worked.
+This is distinct from `light_max_pages_per_source` (default one page
+per Light Tick). Incomplete pages pin their target cursor and resume on
+the next bounded Tick, without widening to chats/inbox scans, skipping
+unread events, or silently resetting the cursor. The host-level cadence
+remains an external 60-second Hook responsibility.

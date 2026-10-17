@@ -61,10 +61,12 @@ A reserved wakeup intent is leased exactly once per generation and not
 retransmitted after a crash without explicit absence evidence.
 Scheduler activity lease owner/generation remain distinct from host wakeup
 lease owner/version and from CrewQuay roles/assignments. Existing schema and
-all older wakeup/Outbox receipts are retained. Social-only activities will
-need an authorized wakeup-source extension before the Hook can wake for
-them; this bridge does **not** pretend that social scheduling is already
-autonomous.
+all older wakeup/Outbox receipts are retained. Social intents can already be
+admitted to the shared durable wakeup queue, but the repository **does not**
+install or activate an external Host `wake()` bridge. The reference Hook
+skips `host-wakeup-prepare` unless its operator has explicitly verified
+host wiring and sets `CREWQUAY_HOST_WAKEUP_WIRED=1`. An unwired bridge must
+not consume leases or mark any activity accepted.
 
 ## Tests
 

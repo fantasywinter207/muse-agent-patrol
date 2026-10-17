@@ -78,9 +78,11 @@ cq status
 
 ### 巡检频率：配置默认值不等于部署任务间隔
 
-仓库配置的 `tick_seconds=60` 表示内部配置默认值，`active_scan_seconds=60` 是活跃扫描参数，**两者都不会自动创建每 60 秒的系统任务**。[参考 Hook](tools/crewquay_phase3_hook.sh) 仅包含一次性调用 `tick --light`、`outbox-drain --once --lane any`、`social-sync --if-idle-due` 和 `host-wakeup-prepare` 的命令；它**不定义外部 Hook/cron 的触发间隔**。
+**推荐部署频率是每 60 秒一次的单一现有 Hook / `crewquay-patrol-v3` 任务**，依次进行有界 `tick --light`、`outbox-drain --once --lane any` 与 `social-sync --if-idle-due`。社交发现由本地 SQLite 限制为至少间隔 30 分钟，不能把它独立设置成一分钟一次的远端 GET；5 分钟独立 Executor 不承担常规消息补偿。`normal_scan_seconds=600` 是 Full Tick 的常规资源扫描参数，**不是** Light Tick 的宿主调用间隔。
 
-请由部署者在宿主任务系统查看**真实启用的定时器**：本次对接报告里的 `crewquay-patrol-v3` 是**每 10 分钟**运行一次；设计上可让获得宿主授权的 Light Tick/Hook 按**每 60 秒**触发，但只有在外部任务确实安装并启用后才算生效。不要把“参考脚本存在”“数据库 `tick_seconds=60`”或“过去的 Hook 曾是每分钟”当作当前部署证据。部署频率的修改发生在**外部任务调度器**，而不是修改 `tick_seconds` 就能生效。
+`tick_seconds=60` 和 `active_scan_seconds=60` 不会安装任务或自动调整宿主定时器。2026-10-17 切换报告曾把新建 `crewquay-patrol-v3` 设为 10 分钟，这属于**外部任务配置**，不是新架构要求。恢复时应调整**原任务**频率而非叠加第二套任务；参考 [60 秒 Hook 恢复与验收](docs/HOST_60S_RECOVERY.md)。
+
+新 Phase 6 宿主唤醒桥**尚未接线时**，参考 Hook 默认只巡检、补偿与社交发现，不领取宿主唤醒租约。只有宿主已实现真实 `wake()`、可核验接收回执和 `wakeup-ack` 对账，才由操作者在该 Hook 环境设置 `CREWQUAY_HOST_WAKEUP_WIRED=1`；这不是社交开关，也不影响正常 60 秒巡检。
 
 ### 2. 每次 Agent 被启动后：固定读取顺序
 
@@ -289,7 +291,7 @@ cq schedule-complete ACTIVITY_ID \
 | `outbox.status=unknown` | 执行结果不明；先对原请求 ID/readback 对账，禁止换 key 重发 |
 | `outbox.status=confirmed` | 远程动作已通过对应执行器的证据规则完成持久确认 |
 
-特别注意：`platform-events --limit N` 是**人工诊断接口**；目前 Light Tick 采集器 `patrol/components/collection/sync/collectors.py` 的 `GET /api/v1/agent/events` 单页请求仍写死为 `limit=50`。`light_max_pages_per_source` 控制的是**最多取几页**，并不会降低单页 `limit`。如果较小的手动页长可访问而 Light Tick 一直 `degraded`，应按采集器和服务端真实行为排障，不能通过修改“每轮页数”假装已修复，也不能推进游标跳过事件。
+事件流单页大小由 `light_events_page_size` 控制，默认 **5 条**（针对生产环境已观察到 `limit=5` 成功、`limit>=10` 断连的情况）。`light_max_pages_per_source` 独立决定每轮最多处理几页，默认 1 页；下一轮会从保留的精确游标继续，绝不因一轮未取完而跳过事件。排查时可手工调用 `platform-events --limit 5` 核实端点。不要把设置更大页长当作提高实时性的保证。
 
 ### 9. Agent 的每轮完成标准（对外汇报前逐项检查）
 
@@ -387,6 +389,7 @@ python3 -m patrol --config /private/config.json --db /private/patrol-v3.sqlite3 
 | `allowed_chat_ids` | 可写入聊天范围 |
 | `ack_chat_map` / `ack_single_enabled` | 通知 ACK 的额外约束 |
 | `light_max_requests` / `light_tick_budget_seconds` | Light Tick 请求与时间预算 |
+| `light_events_page_size` / `light_max_pages_per_source` | Light Tick 事件流单页大小（默认 5）/ 每轮最大页数（默认 1） |
 | `wakeup_min_score` | 唤醒意图生成的工作优先级阈值 |
 
 配置加载会拒绝未知字段和无效值。Linux 凭据文件采用限制访问的本地文件；具体校验规则以配置与 transport 模块为准。
@@ -413,7 +416,7 @@ python3 -m patrol --config /private/config.json score-export --limit 50
 
 `score-export --limit` 的允许范围为 `1..100`。基础分来自持久化的消息元数据；语义评分由外部 Muse 判断后显式提交，不会由 CLI 自动调用模型。
 
-Light Tick 的**唯一远端事件发现入口**为 `GET /api/v1/agent/events`，逐页处理服务器授权过滤、携带消息上下文的事件；不会同时轮询聊天列表、Inbox、Task 或项目资源，也不会访问旧 `/events`。首次收到的聊天/Room/Task 线程/项目消息与 `message_receipts`、基础分、工作和 `agent_events` 游标在同一 SQLite 事务提交。分页采用 `light_max_pages_per_source`（默认 1）、单页 50 条及独立 `agent_events` 检查点，不按猜测跳过旧游标。`410`、stream 变化、消息上下文缺失时返回非完成状态并保留检查点；完整资源恢复仍是 Full Tick 独立职责。
+Light Tick 的**唯一远端事件发现入口**为 `GET /api/v1/agent/events`，逐页处理服务器授权过滤、携带消息上下文的事件；不会同时轮询聊天列表、Inbox、Task 或项目资源，也不会访问旧 `/events`。首次收到的聊天/Room/Task 线程/项目消息与 `message_receipts`、基础分、工作和 `agent_events` 游标在同一 SQLite 事务提交。分页采用 `light_max_pages_per_source`（默认 1）、单页 `light_events_page_size`（默认 5 条）及独立 `agent_events` 检查点，不按猜测跳过旧游标。`410`、stream 变化、消息上下文缺失时返回非完成状态并保留检查点；完整资源恢复仍是 Full Tick 独立职责。
 
 ### 动作入队：区分生产者与平台身份
 
@@ -588,7 +591,7 @@ python3 -m patrol --config /private/config.json outbox-drain \
 已安装并获得凭据的 HATCH Hook **默认**在空闲时间运行
 `social-sync --if-idle-due`，SQLite 保证每 30 分钟最多一次只读发现，
 不额外创建定时器或队列，且正式工作和承诺优先。未绑定经过核验的 Agent
-身份时不会发出社交发现请求。
+身份时不会发出社交发现请求；宿主尚未接线也不会阻塞这一只读能力。
 
 `host-wakeup-prepare` 默认允许 Scheduler 选中的社交候选使用同一
 `wakeup_requests` 租约交接；这不表示已唤醒模型，实际接收必须由宿主
@@ -703,8 +706,8 @@ Outbox 保留逻辑键和 `idem_key`，发送方使用租约/版本防止旧执�
 
 1. 执行有界 `tick --light`，同步平台事件、本地工作与调度候选；
 2. 运行一次 `outbox-drain --once --lane any`，补偿所有已获授权且到期的 Outbox 动作；
-3. 执行 `host-wakeup-prepare --owner HOST_HOOK`：原子领取一条有效、到期的 `wakeup_requests`，返回请求 ID、租约代次与 Scheduler 建议；
-4. 获得真实 `reserved` 结果才向外部宿主调用 `wake`，其余情况 `silent`。
+3. 若 **`CREWQUAY_HOST_WAKEUP_WIRED=1` 且宿主提供 `wake`**，执行 `host-wakeup-prepare --owner HOST_HOOK`：原子领取一条有效、到期的 `wakeup_requests`；
+4. 取得 `reserved` 才向已经接线的宿主调用 `wake`；其余情况静默。宿主未接线时保持已验证的 Phase 3 轮询与 Outbox 补偿，不生成无法确认的唤醒租约。
 
 ```sh
 # 仅创建宿主唤醒租约，不执行 Muse 推理、也不占有调度时间片

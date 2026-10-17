@@ -198,6 +198,9 @@ class SocialWakeTests(unittest.TestCase):
         content=hook.read_text(encoding="utf-8")
         self.assertNotIn("CREWQUAY_SOCIAL_IDLE_ENABLED",content)
         self.assertIn("social-sync --if-idle-due",content)
+        self.assertIn("CREWQUAY_HOST_WAKEUP_WIRED",content)
+        self.assertLess(content.index("CREWQUAY_HOST_WAKEUP_WIRED"),
+                        content.index("host-wakeup-prepare"))
         self.assertNotIn("--include-social",content)
         self.assertLess(content.index("tick --light"),content.index("social-sync --if-idle-due"))
         self.assertLess(content.index("social-sync --if-idle-due"),
@@ -206,6 +209,50 @@ class SocialWakeTests(unittest.TestCase):
         if os.name=="posix" and shutil.which("bash"):
             syntax=subprocess.run(["bash","-n",str(hook)],capture_output=True,text=True)
             self.assertEqual(syntax.returncode,0,syntax.stderr)
+
+    def test_unwired_reference_hook_does_not_claim_unknown_host_wakeup(self):
+        if (os.name!="posix" or not shutil.which("bash") or
+                not shutil.which("flock") or not shutil.which("timeout")):
+            self.skipTest("reference Hook requires bash, flock and timeout")
+        root=Path(__file__).resolve().parents[1]
+        hook=root/"tools"/"crewquay_phase3_hook.sh"
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp)
+            bin_dir=folder/"bin"
+            bin_dir.mkdir()
+            calls=folder/"mock-calls.txt"
+            runtime=folder/"host-runtime.sh"
+            runtime.write_text(
+                'log() { :; }\n'
+                'silent() { printf "%s\\n" "$2"; }\n'
+                'wake() { echo SHOULD_NOT_WAKE; }\n',encoding="utf-8")
+            mock_python=bin_dir/"python3"
+            mock_python.write_text(
+                '#!/bin/sh\n'
+                'printf "%s\\n" "$*" >> "$MOCK_CALLS"\n'
+                'exit 0\n',encoding="utf-8")
+            mock_python.chmod(0o755)
+            env=dict(os.environ,
+                HATCH_HOOK_RUNTIME=str(runtime),
+                CREWQUAY_REPO=str(root),
+                CREWQUAY_DB=str(self.path),
+                CREWQUAY_CONFIG=str(folder/"config.json"),
+                CREWQUAY_HOOK_LOCK=str(folder/"hook.lock"),
+                MOCK_CALLS=str(calls),
+                PATH=str(bin_dir)+os.pathsep+os.environ.get("PATH",""))
+            # The default must be safe even with no deployment flag at all.
+            env.pop("CREWQUAY_HOST_WAKEUP_WIRED",None)
+            result=subprocess.run(["bash",str(hook)],env=env,
+                                  capture_output=True,text=True,timeout=12)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertIn('"status":"poll_only"',result.stdout)
+            commands=calls.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(commands),3,commands)
+            self.assertIn("tick --light",commands[0])
+            self.assertIn("outbox-drain --once --lane any",commands[1])
+            self.assertIn("social-sync --if-idle-due",commands[2])
+            self.assertFalse(any("host-wakeup-prepare" in x for x in commands))
+            self.assertNotIn("SHOULD_NOT_WAKE",result.stdout)
 
     def test_old_work_promise_database_migrates_without_losing_lease_history(self):
         old_ddl="""CREATE TABLE wakeup_requests(
