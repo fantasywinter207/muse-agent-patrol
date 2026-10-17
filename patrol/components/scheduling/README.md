@@ -8,6 +8,7 @@ Dispatch *local Muse activities* with deadline-aware weighted fairness and safe-
 - Derive candidate priority dynamically from task urgency, wait duration, service consumed, and context-switch cost; use a finite time slice and hysteresis for preemption decisions. The waiting credit continues to grow after the initial 15-minute ramp so low-base work can eventually compete; an imminently due running activity remains protected from non-urgent challengers.
 - Persist preemption requests without killing model processes. A live owner voluntarily yields at a checkpoint boundary; suspension and resumed leases increment a fencing generation. Support optional strict v1 Checkpoint envelopes and read-only `schedule-restore` packs that inspect referenced Outbox statuses before an Agent decides to resume.
 - Import actionable local `human_action` work by stable work ID, without claiming, completing, or granting access to CrewQuay tasks.
+- Register non-`human_action` due promises as one-shot `promise_due:<id>:<next_action_at>` activities on the **same Scheduler**, so an accepted promise wake has runnable work. Advancement/completion changes the generation; `schedule-complete` rejects an unchanged open promise without recorded progress.
 - Expired local leases become resumable with explicit reconciliation warning. A linked locally claimed Queue lease is released and fenced atomically at a safe-point yield or Scheduler lease expiry. Neither scheduling nor suspension mutates a remote side effect.
 
 ## Non-responsibilities
