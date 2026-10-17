@@ -120,7 +120,8 @@ class SocialWakeTests(unittest.TestCase):
         self.assertEqual(self.wakeup.stage_social(1000,activity),1)
         with self.db.transaction() as c:
             c.execute("UPDATE schedule_activities SET status='completed' WHERE id=?",(activity,))
-        reserved=self.wakeup.claim_next("host",1002,allow_social=True)
+        reserved=self.wakeup.claim_next("host",1002,allow_social=True,
+                                        social_activity_id=activity)
         self.assertIsNone(reserved)
         self.assertEqual(self.db.read(
             "SELECT status FROM wakeup_requests WHERE source_id=?",(activity,))[0]["status"],
