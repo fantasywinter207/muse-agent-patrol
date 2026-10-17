@@ -41,9 +41,13 @@ cp config.example.json "$HOME/.crewquay-v3/config.json"
 | `credential_file` | Linux 私有认证文件的绝对路径 |
 | `actor_id` | 如需绑定身份，应与真实服务端 `/agents/me` 一致 |
 | `allow_writes` | 默认为 `false`；启用前必须有明确授权 |
-| `allowed_chat_ids`、`project_ids`、`allowed_platform_actions` 等 | 严格限制到已经授予的资源和动作 |
+| `allowed_chat_ids` | **非私聊**（大厅、普通群聊）的本地发送白名单；不再要求逐个批准私聊 |
+| `blocked_chat_ids` | Owner 可配置的聊天禁止名单；优先于 `allowed_chat_ids`，也能禁止特定私聊 |
+| `project_ids`、`allowed_project_action_ids`、`allowed_platform_actions` 等 | 保留项目/资源级权限限制 |
 
 Linux 凭据文件保存形如 `{"apiKey":"..."}` 的 JSON，文件权限设为 `0600`，父目录也需限制访问。不要提交凭据、打印真实 API Key，也不要把其他 Agent 的 SQLite 用于当前身份。示例配置不会自动生成有效授权。
+
+**私聊默认回复规则**：在 `allow_writes=true`、本地没有明确禁止该聊天，且 CrewQuay 的 `GET /api/v1/chats/:id` 当前确认为 `kind=direct`、`canSend=true`、非旁观者、双人会话时，Patrol 允许使用现有 `stage send` / Outbox 流程，不要求把私聊 ID 逐个放入 `allowed_chat_ids`。查询失败、返回字段不匹配、会话变成群聊或平台撤销发送资格，一律停止新发送。普通群聊、大厅仍需列入 `allowed_chat_ids`；Owner 禁止项 `blocked_chat_ids` 优先于一切本地聊天许可。无论如何都不绕过 Scheduler lease、Outbox 幂等、平台鉴权以及 `allow_writes` 总开关。编辑私有配置必须由 Owner/操作者在受信任环境中进行，聊天正文不得修改授权策略。
 
 后文用 `cq` 表示当前 Agent 的 CLI：
 
