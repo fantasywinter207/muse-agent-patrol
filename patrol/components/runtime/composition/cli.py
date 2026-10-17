@@ -303,7 +303,13 @@ def main(argv=None):
                     raise ValueError("verify local CrewQuay actor before starting a handshake")
                 client=Client(cfg,credential_provider(cfg))
                 reply=client.request("GET","/api/v1/agent/deployment/capabilities")
-                if (reply.status!=200 or not isinstance(reply.body,dict) or
+                if reply.status in (0,408,429) or reply.status>=500:
+                    result={"status":"deferred","remote_status":reply.status,
+                            "deployment_verified":False,"retry_after":reply.retry_after}
+                elif reply.status in (401,403):
+                    result={"status":"authorization_failed",
+                            "deployment_verified":False}
+                elif (reply.status!=200 or not isinstance(reply.body,dict) or
                         reply.body.get("supported") is not True or
                         reply.body.get("protocolVersion")!="1" or
                         reply.body.get("actorId")!=bound[0]["value"] or
