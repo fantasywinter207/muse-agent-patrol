@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from patrol.components.config.index import Config
 from patrol.components.persistence.index import Database
@@ -216,6 +217,33 @@ class EventOnlyLightTests(unittest.TestCase):
         self.assertIn("agent_events:resync_required",result["incomplete_sources"])
         self.assertNotEqual(result["status"],"ok")
         self.assertEqual(self.db.read("SELECT received FROM sync_cursors WHERE source='agent_events'")[0]["received"],"0")
+
+    def test_small_pages_survive_upstream_large_limit_disconnect(self):
+        # Exercise two *separate* Light Ticks with pinned upper cursor.
+        # Default page size must avoid the upstream limit>=10 disconnect.
+        items=[event(seq=i,kind="task.ready") for i in range(1,8)]
+        first,calls1=self.tick([Response(200,page(
+            items[:5],to="7",has_more=True,next_cursor="5"))])
+        self.assertEqual(first["event_replay"],"incomplete",first)
+        checkpoint=self.db.read(
+            "SELECT received,target FROM sync_cursors WHERE source='agent_events'")[0]
+        self.assertEqual((checkpoint["received"],checkpoint["target"]),("5","7"))
+        second,calls2=self.tick([Response(200,page(
+            items[5:],to="7",has_more=False,next_cursor="7"))],now=1060)
+        self.assertEqual(second["event_replay"],"complete",second)
+        self.assertEqual(second["status"],"ok",second)
+        requests=[parse_qs(urlsplit(path).query) for _,path in calls1+calls2
+                  if path.startswith("/api/v1/agent/events?")]
+        self.assertEqual([q["limit"] for q in requests],[["5"],["5"]])
+        self.assertEqual([q["after"] for q in requests],[["0"],["5"]])
+        self.assertNotIn("to",requests[0])
+        self.assertEqual(requests[1]["to"],["7"])
+        self.assertEqual(self.db.read(
+            "SELECT COUNT(*) AS n FROM events WHERE source='agent_events'")[0]["n"],7)
+        final=self.db.read(
+            "SELECT received,target,failures FROM sync_cursors WHERE source='agent_events'")[0]
+        self.assertEqual((final["received"],final["target"],final["failures"]),
+                         ("7",None,0))
 
     def test_page_limit_does_not_advance_without_follow_up(self):
         e=event()

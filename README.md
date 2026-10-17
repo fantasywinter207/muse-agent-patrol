@@ -96,10 +96,10 @@ cq doctor
 cq status
 cq tick --offline
 cq platform-catalog
-cq platform-events --after 0 --limit 5
+cq platform-events --after 0
 ```
 
-这些命令用于初始化、只读诊断与能力核对，**不是**安装定时任务。生产接口曾观察到较大 `limit` 断连；目前 Light Tick 默认 `light_events_page_size=5`，不要未经验证增加。`normal_scan_seconds=600` 是 Full Tick 的内部扫描参数，**不是**宿主 Hook 的 10 分钟触发间隔。
+这些命令用于初始化、只读诊断与能力核对，**不是**安装定时任务。生产接口曾观察到较大 `limit` 断连；目前 Light Tick 和 `platform-events` 诊断命令都采用 `light_events_page_size` 配置，默认每页 5 条；诊断命令仍可显式传 `--limit`，但不要未经验证增加。`normal_scan_seconds=600` 是 Full Tick 的内部扫描参数，**不是**宿主 Hook 的 10 分钟触发间隔。
 
 ## 4. HATCH 60 秒 Hook：唯一运行入口
 
