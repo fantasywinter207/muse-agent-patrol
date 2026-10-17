@@ -47,6 +47,20 @@ else
 fi
 exec 9>&-
 
+# Phase 3's proven 60-second Light Tick + Outbox compensation must keep
+# working even if the new Phase 6 host handoff has not been connected.
+# A mere local Wakeup intent is NOT a host delivery receipt. Never claim a
+# wakeup lease until an operator confirms that the host wake + ack bridge
+# is actually installed and has a verifiable acceptance contract.
+if [[ "${CREWQUAY_HOST_WAKEUP_WIRED:-0}" != "1" ]]; then
+  silent "host wake bridge not wired; polling and outbox completed" '{"status":"poll_only"}'
+  exit 0
+fi
+if ! type wake >/dev/null 2>&1; then
+  silent "host wake function unavailable; no wake lease acquired" '{"status":"host_unavailable"}'
+  exit 0
+fi
+
 # The ONLY wake dispatch source is the preexisting durable wakeup_requests.
 # Lease a specific due intent BEFORE calling the external host's wake().
 # No model is started here; the Muse worker separately runs schedule-next.
