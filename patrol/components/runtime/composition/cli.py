@@ -211,6 +211,8 @@ def parser():
     a.add_argument("--reason",required=True)
     a=sub.add_parser("schedule-status")
     a.add_argument("--limit",type=int,default=50)
+    a=sub.add_parser("schedule-restore")
+    a.add_argument("id")
     return p
 
 
@@ -346,6 +348,8 @@ def main(argv=None):
                 result=Scheduler(db,cfg.lease_seconds).cancel(args.id,now,args.reason)
             elif args.command=="schedule-status":
                 result=Scheduler(db,cfg.lease_seconds).snapshot(now,args.limit)
+            elif args.command=="schedule-restore":
+                result=Scheduler(db,cfg.lease_seconds).restore(args.id,now)
             elif args.command=="outbox-drain":
                 if not args.once:
                     raise ValueError("outbox-drain is deliberately single-shot: pass --once")
