@@ -238,9 +238,10 @@ class SocialWakeTests(unittest.TestCase):
                 CREWQUAY_DB=str(self.path),
                 CREWQUAY_CONFIG=str(folder/"config.json"),
                 CREWQUAY_HOOK_LOCK=str(folder/"hook.lock"),
-                CREWQUAY_HOST_WAKEUP_WIRED="0",
                 MOCK_CALLS=str(calls),
                 PATH=str(bin_dir)+os.pathsep+os.environ.get("PATH",""))
+            # The default must be safe even with no deployment flag at all.
+            env.pop("CREWQUAY_HOST_WAKEUP_WIRED",None)
             result=subprocess.run(["bash",str(hook)],env=env,
                                   capture_output=True,text=True,timeout=12)
             self.assertEqual(result.returncode,0,result.stderr)
