@@ -4,7 +4,7 @@
 
 Phase 3 的真实 60 秒 Hook 已经验证：在 5 分钟 Full Tick 暂停后，Owner 私聊测试 3/3 条取得 confirmed，且有 Outbox 去重及补偿证据。升级 v3 不应把发现周期回退到旧巡检的 600 秒。**这是一项宿主任务调度修复，不是数据库迁移，也不是增加第二套定时器。**
 
-本仓库只提供一次性 Patrol CLI 和 `tools/crewquay_phase3_hook.sh` 参考入口；不会修改 HATCH 的实际任务定义。请由拥有宿主任务管理权限的操作者在已有 `crewquay-patrol-v3` 上执行下列变更，并保留任务配置与实际运行证据。
+**v3 仓库是唯一支持的运行代码来源。** 本仓库提供一次性 Patrol CLI 和 `tools/crewquay_phase3_hook.sh` 参考入口；不会自动修改宿主的实际任务定义。请由拥有真实宿主任务管理权限的操作者在**现有** `crewquay-patrol-v3` 上执行下列变更，并保留任务配置与实际运行证据。无需、也不允许并行启动旧 v2 Patrol、旧 watchdog 或旧 5 分钟 Executor。
 
 ## 唯一任务的期望状态
 
@@ -20,14 +20,14 @@ Phase 3 的真实 60 秒 Hook 已经验证：在 5 分钟 Full Tick 暂停后，
 | 5 分钟独立 Executor | 继续暂停；用同一 Hook 做到期 Outbox 补偿 |
 | 宿主 Phase 6 唤醒桥 | 未实际接通并证明接收回执时保持不启用，不占用 `wakeup_requests` 租约 |
 
-宿主侧应**修改现有任务的 interval（600 → 60 秒）**，不要新建第二个 `cron`、systemd timer 或 HATCH 任务。先读取其**真实命令**：如当前仅运行 `tick --light`，则不应因此谎称包含 Outbox 补偿和社交发现；需在原入口中保持/恢复 Phase 3 已验证的单 Hook 顺序。完整命令运行前必须确认工作目录、配置、凭据文件、SQLite 和 Hook runtime 属于同一授权 Agent。
+宿主侧应**修改现有任务的 interval（600 → 60 秒）**，不要新建第二个 `cron`、systemd timer 或 HATCH 任务。即使以后采用进程守护或配置即代码的部署管理，运行中的任务触发权仍位于宿主环境，GitHub 文件不会自动替代宿主任务定义。先读取其**真实命令**：如当前仅运行 `tick --light`，则不应因此谎称包含 Outbox 补偿和社交发现；需在原入口中保持/恢复 Phase 3 已验证的单 Hook 顺序。完整命令运行前必须确认工作目录、配置、凭据文件、SQLite 和 Hook runtime 属于同一授权 Agent。
 
 仓库参考脚本按单次调用运行。若直接采用，操作者需要提供 `HATCH_HOOK_RUNTIME`、`CREWQUAY_REPO`、`CREWQUAY_CONFIG`、`CREWQUAY_DB`；状态文件与凭据不放进仓库。脚本逐段有界执行：Light Tick ≤21 秒、Outbox 补偿 ≤20 秒、社交发现 ≤6 秒、可选宿主交接 ≤8 秒；锁保证上一轮未结束时不叠加执行。不可将这些阶段拆成多个每分钟定时任务。
 
 ## 新旧宿主唤醒机制的边界
 
 - 60 秒巡检、已授权 Outbox 补偿、只读社交发现**不依赖**新的 `host-wakeup-prepare`。
-- 参考 Hook 的 `CREWQUAY_HOST_WAKEUP_WIRED` 默认不为 `1`，因此不会为了未部署的 Phase 6 桥领取唤醒租约。已在用的原 Phase 3 Worker/宿主唤醒机制不由这个开关重配或删除。
+- 参考 Hook 的 `CREWQUAY_HOST_WAKEUP_WIRED` 默认不为 `1`，因此不会为了未部署的 Phase 6 桥领取唤醒租约。**此时只能证明轮询/补偿/社交候选发现，不能证明无人值守消息回复。** 停用旧 v2/旧独立 worker 后，真实 Muse 的唤醒必须通过已接线的 v3 宿主桥完成，不以恢复旧进程作为回退方案。
 - **仅当已验证 `wake()` 确实接到宿主并有可靠的接受回执**，才能在该 Hook 的受控环境中设置 `CREWQUAY_HOST_WAKEUP_WIRED=1`，使用 `host-wakeup-prepare` 和同一 `wakeup-ack` 持久对账。开启前先在隔离测试圈完成 `reserved → actual wake → accepted receipt → Muse executed` 的测试。
 - `CREWQUAY_HOST_WAKEUP_WIRED` 表示新宿主桥是否**真实就绪**，不是社交是否开启。社交发现保持默认开启、30 分钟节流；未就绪仅禁止虚假的宿主唤醒领取。
 - `allow_writes`、三项 `allowed_chat_ids`、项目与社区动作权限保持原始实际授权范围；这次频率修改不扩大写权限，不执行任何新的平台任务 claim/submit/review。
