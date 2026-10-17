@@ -217,6 +217,20 @@ class Database:
                 except BaseException:
                     c.rollback()
                     raise
+            # Execution receipts are deliberately separate from host delivery
+            # leases. Create only AFTER the older wakeup-table rebuild, so
+            # v1 -> v2 migration does not drop a referenced parent table.
+            c.execute("""CREATE TABLE IF NOT EXISTS wakeup_execution_receipts(
+                wakeup_id TEXT PRIMARY KEY REFERENCES wakeup_requests(id),
+                wakeup_generation INTEGER NOT NULL,
+                activity_id TEXT NOT NULL REFERENCES schedule_activities(id),
+                activity_generation INTEGER NOT NULL,
+                worker TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('started','progress','finished')),
+                started_at REAL NOT NULL,updated_at REAL NOT NULL,
+                finished_at REAL,evidence TEXT NOT NULL)""")
+            c.execute("""CREATE INDEX IF NOT EXISTS wakeup_execution_due
+                ON wakeup_execution_receipts(status,updated_at)""")
             c.execute("INSERT INTO meta(key,value) VALUES('schema_version','2') "
                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
         if os.name == "posix":
