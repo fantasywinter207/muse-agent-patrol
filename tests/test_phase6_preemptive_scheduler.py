@@ -10,6 +10,7 @@ from patrol.components.queue.index import Queue
 from patrol.components.config.index import Config
 from patrol.components.runtime.index import Tick
 from patrol.components.wakeup.index import Wakeups
+from patrol.components.scheduling.policy.scoring import priority, preemption
 
 
 class PreemptiveSchedulerTests(unittest.TestCase):
@@ -448,6 +449,29 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         with self.assertRaises(StaleLease):
             Outbox(self.db).stage("post-completion-bypass","muse",
                                   "send","chat",{"content":"no fence"},1002)
+
+
+    def test_unbounded_waiting_credit_eventually_beats_continuous_high_base(self):
+        self.add("urgent-looking-background","maintenance",now=1000,score=100)
+        low=self.add("patient-background","maintenance",now=1000,score=5)
+        picked=self.scheduler.dispatch("worker",1000)["activity"]
+        # Use the pure heuristic to avoid expiring the simulated worker lease.
+        running=self.db.read("SELECT * FROM schedule_activities WHERE id=?",(picked["id"],))[0]
+        waiting=self.db.read("SELECT * FROM schedule_activities WHERE id=?",(low,))[0]
+        self.assertLess(priority(waiting,1001),priority(running,1001,running=True))
+        self.assertGreater(priority(waiting,5000),priority(running,5000,running=True))
+        self.assertIsNotNone(preemption(running,waiting,5000))
+
+    def test_imminent_deadline_protected_from_aged_nonurgent_activity(self):
+        imminent=self.add("hard-due","work",now=1000,score=70,deadline=1015)
+        waiting=self.add("old-background","maintenance",now=0,score=5)
+        active=self.scheduler.dispatch("worker",1000)["activity"]
+        self.assertEqual(active["id"],imminent)
+        running=self.db.read("SELECT * FROM schedule_activities WHERE id=?",(imminent,))[0]
+        challenger=self.db.read("SELECT * FROM schedule_activities WHERE id=?",(waiting,))[0]
+        # A giant waiting credit must not force a task due in 15 seconds
+        # out of its running safe point.
+        self.assertIsNone(preemption(running,challenger,1000))
 
 
 if __name__=="__main__":
