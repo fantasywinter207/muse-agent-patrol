@@ -71,6 +71,25 @@ class WakeupExecutionReceiptsTests(unittest.TestCase):
             "SELECT status FROM wakeup_requests WHERE id=?",(wake["id"],))[0]["status"],
             "accepted")
 
+    def test_bounded_health_scan_advances_past_already_alerted_rows(self):
+        # A fixed limit must not let the first old, already-alerted wakeup
+        # hide subsequent stalled accepted requests forever.
+        for i in range(3):
+            ident=self.queue.enqueue("human:many"+str(i),"human_action",
+                                     {"reason":"task"},1000+i,priority=90)
+        self.assertEqual(self.wake.stage(1005,threshold=70,limit=10),3)
+        for i in range(3):
+            claimed=self.wake.claim_next("hatch",1005+i)
+            self.assertIsNotNone(claimed)
+            self.wake.acknowledge(claimed["id"],"hatch",claimed["lease_version"],
+                                  1006+i,"accepted",{"host":"verified"})
+        seen=[]
+        for _ in range(3):
+            report=self.wake.execution_health(1400,limit=1)
+            seen.append(report["new_alerts"])
+        self.assertEqual(seen,[1,1,1])
+        self.assertEqual(self.wake.execution_health(1400,limit=1)["new_alerts"],0)
+
     def test_started_progress_finished_need_correct_worker_and_generation(self):
         wid,wake=self.accepted_work()
         running=self.schedule.dispatch("muse",1002)["activity"]
