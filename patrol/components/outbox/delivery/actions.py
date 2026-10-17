@@ -113,6 +113,16 @@ class Outbox:
                 if (row["actor"],row["action"],row["target"],row["payload_hash"])!=(actor,action,target,sha):
                     raise ValueError("logical action has different immutable request")
                 return row["id"]
+            # New model-authored business effects must not bypass the
+            # Scheduler merely by omitting --schedule-generation. The Hook's
+            # receipt/read compensation remains a separate system lane.
+            # Existing immutable logical keys are returned above, preserving
+            # readback after a yielded generation.
+            if schedule_context is None and action not in ("ack","read"):
+                active=c.execute("""SELECT 1 FROM schedule_activities
+                    WHERE status IN ('ready','running','suspended') LIMIT 1""").fetchone()
+                if active:
+                    raise StaleLease("new business action requires a live scheduler generation")
             # A genuinely new remote action must be fenced in the SAME
             # transaction as insertion. Existing immutable actions are looked
             # up first, even if the original activity has since yielded.
@@ -123,13 +133,20 @@ class Outbox:
                         or not isinstance(schedule_context["owner"],str)
                         or type(schedule_context["generation"]) is not int):
                     raise ValueError("invalid schedule fencing context")
-                live=c.execute("""SELECT id,kind FROM schedule_activities
+                live=c.execute("""SELECT id,kind,work_id FROM schedule_activities
                     WHERE id=? AND status='running' AND lease_owner=?
                     AND lease_version=? AND lease_until>? AND preempt_requested=0""",
                     (schedule_context["id"],schedule_context["owner"],
                      schedule_context["generation"],now)).fetchone()
                 if live is None:
                     raise StaleLease("scheduler generation is suspended, preempt requested, stale or expired")
+                if live["work_id"] and action not in ("ack","read"):
+                    work=c.execute("""SELECT 1 FROM work_items WHERE id=?
+                        AND status='running' AND lease_owner=?
+                        AND lease_until>?""",
+                        (live["work_id"],schedule_context["owner"],now)).fetchone()
+                    if work is None:
+                        raise StaleLease("scheduled work needs a live matching Queue lease")
                 if live["kind"]=="social":
                     intent=c.execute("""SELECT resource_type,resource_id,action
                         FROM social_intents WHERE activity_id=?""",
