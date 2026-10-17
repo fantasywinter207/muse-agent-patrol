@@ -360,6 +360,13 @@ class Wakeups:
                 WHERE w.status='accepted'
                   AND COALESCE(x.updated_at,w.confirmed_at,w.created_at)<=?
                   AND (x.status IS NULL OR x.status!='finished')
+                  AND NOT EXISTS(
+                      SELECT 1 FROM alerts a
+                      WHERE a.logical_key=('wakeup_execution:'||w.id||':'||
+                          CAST(w.lease_version AS TEXT)||':'||
+                          CASE WHEN x.status IS NULL THEN 'accepted_without_start'
+                               ELSE 'started_without_progress' END)
+                  )
                 ORDER BY COALESCE(x.updated_at,w.confirmed_at,w.created_at),w.id
                 LIMIT ?""",(now-threshold,limit)).fetchall()
             for row in rows:
