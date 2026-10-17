@@ -300,5 +300,104 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         self.assertEqual(self.db.read("SELECT status FROM work_items WHERE logical_key='human:auto'")[0]["status"],"pending")
 
 
+    def test_linked_work_yield_releases_queue_lease_and_reclaims_on_resume(self):
+        work=Queue(self.db).enqueue("human:handoff","human_action",
+                                    {"reason":"formal work"},1000,priority=50)
+        self.scheduler.sync_work(1000)
+        active=self.scheduler.dispatch("worker-a",1001)["activity"]
+        original=Queue(self.db).claim_specific(work,"worker-a",1002,
+                                               {"operator":"approved"})
+        self.assertEqual(original["status"],"running")
+        self.add("deadline-task","research",now=1003,score=70,deadline=1010)
+        self.assertEqual(self.scheduler.assess(1003)["advice"],"checkpoint_at_safe_point")
+        saved=self.scheduler.checkpoint(active["id"],"worker-a",
+                        active["lease_version"],1004,
+                        {"step":2,"summary":"partial"},voluntary=True)
+        self.assertTrue(saved["suspended"])
+        queue_state=self.db.read("SELECT status,lease_owner,lease_version FROM work_items WHERE id=?",(work,))[0]
+        self.assertEqual(queue_state["status"],"pending")
+        self.assertIsNone(queue_state["lease_owner"])
+        self.assertGreater(queue_state["lease_version"],original["lease_version"])
+        with self.assertRaises(StaleLease):
+            Queue(self.db).claim_specific(work,"worker-a",1004.1,{"operator":"stale"})
+        urgent=self.scheduler.dispatch("worker-b",1005)["activity"]
+        self.assertEqual(urgent["logical_key"],"deadline-task")
+        self.scheduler.complete(urgent["id"],"worker-b",urgent["lease_version"],
+                                1006,{"finished":"urgent"})
+        resumed=self.scheduler.dispatch("worker-a",1007)["activity"]
+        self.assertEqual(resumed["id"],active["id"])
+        self.assertEqual(resumed["checkpoint"]["step"],2)
+        again=Queue(self.db).claim_specific(work,"worker-a",1008,{"operator":"approved"})
+        self.assertGreater(again["lease_version"],original["lease_version"])
+        with self.assertRaises(StaleLease):
+            Queue(self.db).finish(original,1009,evidence={"stale":True})
+
+    def test_recovery_fences_both_scheduler_and_queue_leases(self):
+        work=Queue(self.db).enqueue("human:crash-recovery","human_action",
+                                    {"reason":"task"},1000,priority=75)
+        self.scheduler.sync_work(1000)
+        active=self.scheduler.dispatch("worker-a",1001)["activity"]
+        old=Queue(self.db).claim_specific(work,"worker-a",1002,{"started":"real"})
+        # Scheduler expires before the matching Queue lease. Dispatch must
+        # release the old Queue owner, not wait for the next patrol tick.
+        resumed=self.scheduler.dispatch("worker-b",1121)
+        self.assertEqual(resumed["lease_recovered"],1)
+        self.assertEqual(resumed["activity"]["id"],active["id"])
+        row=self.db.read("SELECT status,lease_version FROM work_items WHERE id=?",(work,))[0]
+        self.assertEqual(row["status"],"pending")
+        self.assertGreater(row["lease_version"],old["lease_version"])
+        fresh=Queue(self.db).claim_specific(work,"worker-b",1122,{"reconciled":"outbox"})
+        self.assertEqual(fresh["lease_owner"],"worker-b")
+
+    def test_scheduler_work_requires_matching_queue_claim_before_effect(self):
+        work=Queue(self.db).enqueue("human:fenced","human_action",
+                                    {"reason":"requires claim"},1000,priority=75)
+        self.scheduler.sync_work(1000)
+        active=self.scheduler.dispatch("worker-a",1001)["activity"]
+        context={"id":active["id"],"owner":"worker-a",
+                 "generation":active["lease_version"]}
+        with self.assertRaises(StaleLease):
+            Outbox(self.db).stage("premature","muse","send","chat",
+                                  {"content":"not claimed"},1001,schedule_context=context)
+        Queue(self.db).claim_specific(work,"worker-a",1002,{"operator":"approved"})
+        ident=Outbox(self.db).stage("claimed","muse","send","chat",
+                                   {"content":"safe"},1003,schedule_context=context)
+        self.assertTrue(ident)
+
+    def test_unscheduled_business_staging_cannot_bypass_active_generation(self):
+        self.add("social-work","social")
+        with self.assertRaises(StaleLease):
+            Outbox(self.db).stage("unfenced-ready","muse","send","chat",
+                                  {"content":"must be scheduled"},1000)
+        running=self.scheduler.dispatch("worker",1001)["activity"]
+        with self.assertRaises(StaleLease):
+            Outbox(self.db).stage("unfenced-running","muse","send","chat",
+                                  {"content":"must be scheduled"},1002)
+        self.scheduler.checkpoint(running["id"],"worker",running["lease_version"],
+                                  1003,{"phase":"paused"},voluntary=True)
+        with self.assertRaises(StaleLease):
+            Outbox(self.db).stage("unfenced-suspended","muse","send","chat",
+                                  {"content":"must be scheduled"},1004)
+        # System receipt actions are intentionally independent of the
+        # Scheduler, so the existing HATCH read/ack lane still works.
+        ident=Outbox(self.db).stage("system-ack","muse","ack","inbox",
+                                   {"ids":[1]},1005)
+        self.assertTrue(ident)
+
+    def test_disappearing_challenger_clears_preemption_and_avoids_yield(self):
+        running_id=self.add("current","research",score=50)
+        first=self.scheduler.dispatch("worker",1000)["activity"]
+        contender=self.add("cancelled-urgent","research",now=1001,
+                           score=90,deadline=1010)
+        decision=self.scheduler.dispatch("other",1002)
+        self.assertEqual(decision["advice"],"checkpoint_at_safe_point")
+        self.scheduler.cancel(contender,1003,"no longer needed")
+        continued=self.scheduler.checkpoint(running_id,"worker",
+                           first["lease_version"],1004,{"progress":"ongoing"})
+        self.assertFalse(continued["suspended"])
+        self.assertFalse(continued["activity"]["preempt_requested"])
+        self.assertEqual(self.scheduler.reconcile(1005)["decision"]["advice"],"continue")
+
+
 if __name__=="__main__":
     unittest.main()
