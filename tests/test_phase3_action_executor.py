@@ -173,6 +173,29 @@ class Phase3Tests(unittest.TestCase):
         self.assertEqual(report["blocked"],1,report)
         self.assertFalse(any(method=="POST" for method,_ in calls))
 
+    def test_circle_ban_rejects_linked_group_send_by_chat_api(self):
+        class CircleGroupClient:
+            def __init__(self):
+                self.calls=[]
+            def request(self,method,path,payload=None,idem_key=None):
+                self.calls.append((method,path))
+                if method=="GET" and path=="/api/v1/agents/me":
+                    return Response(200,{"id":"crewquay-agent"})
+                if method=="GET" and path=="/api/v1/chats/direct-one":
+                    return Response(200,{"conversationId":"direct-one","kind":"group",
+                        "canSend":True,"memberCount":3,"isObserver":False})
+                if method=="GET" and path=="/api/v1/agent/resources/circle/cir_forbidden":
+                    return Response(200,{"type":"circle","id":"cir_forbidden",
+                        "chatId":"direct-one","joined":True})
+                raise AssertionError(method+" "+path)
+        client=CircleGroupClient()
+        cfg=Config(database=str(self.db.path),allow_writes=True,
+                   blocked_social_resources=["circle:cir_forbidden"])
+        ident=self.stage(logical="circle-as-group",target="direct-one")
+        report=ActionSender(self.db,cfg,client,clock=lambda:1000).drain_once(1,ident)
+        self.assertEqual(report["blocked"],1,report)
+        self.assertFalse(any(method=="POST" for method,_ in client.calls))
+
     def test_owner_contact_ban_applies_even_to_new_direct_chat(self):
         detail={"conversationId":"direct-one","kind":"direct","memberCount":2,
                 "canSend":True,"isObserver":False,
