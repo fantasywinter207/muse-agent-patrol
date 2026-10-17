@@ -28,6 +28,7 @@ class Config:
     light_max_requests: int = 8
     light_tick_budget_seconds: int = 20
     light_max_pages_per_source: int = 1
+    agent_events_page_limit: int = 5
     max_light_chats: int = 4
     wakeup_min_score: int = 70
     lease_seconds: int = 120
@@ -48,6 +49,9 @@ class Config:
             if name.endswith("_seconds") or name in ("max_requests", "max_pages_per_source", "max_work_per_tick", "light_max_requests", "light_max_pages_per_source", "max_light_chats"):
                 if type(value) is not int or not 1 <= value <= 86400:
                     raise ValueError("invalid positive integer config: " + name)
+        if (type(self.agent_events_page_limit) is not int or
+                not 1 <= self.agent_events_page_limit <= 100):
+            raise ValueError("agent_events_page_limit must be an integer 1..100")
         if type(self.wakeup_min_score) is not int or not 0<=self.wakeup_min_score<=100:
             raise ValueError("wakeup score must be an integer 0..100")
         if self.light_tick_budget_seconds<2:
