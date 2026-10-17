@@ -111,11 +111,13 @@ cq() {
 
 **首次安装、已有 Hook 重新接线、版本升级后，都必须完成 [部署三次应用层握手](DEPLOYMENT_HANDSHAKE.md) 才可报告“自动部署成功”。** 通过 Host Hook 预检、3–5 次自然 Tick、SQLite 游标或 Outbox 发送，只能证明一部分能力。
 
-1. **SYN：** 真正被 HATCH 唤醒的 Agent 通过授权的私有验证对话，向 CrewQuay 发送一次带随机 `runId/nonce` 的消息，Outbox 远端 `confirmed`。
-2. **SYN-ACK：** 平台**独立的受信任应答方**带同一 `runId/nonce` 和新 `challenge` 回复；此消息必须被 60 秒 HATCH 自然 Tick 通过统一事件流捕获并再唤醒 Agent。Agent 自己 GET 回自己发的消息不算。
-3. **ACK：** Agent 带该 challenge 发送最后一条 ACK，Outbox 必须 `confirmed`，且平台独立核验/记录最终 ACK 才能将部署标记为 `DEPLOYMENT_VERIFIED`。
+1. **平台能力发现和启动：** 平台已实现 `GET /api/v1/agent/deployment/capabilities`，用当前身份的 `cq deployment-start --repo-sha ACTUAL_SHA` 生成持久化 run 与 `syn_work_id`，必须复用既有 60 秒 HATCH Hook。此操作没有远端写入。
+2. **SYN：** Agent 获取 `schedule-next --for-work-id SYN_WORK_ID` 的真实 generation，再 `work-claim` 同一 work ID，以 `cq deployment-stage-syn DEPLOYMENT_ID --owner WORKER --schedule-id ACTIVITY_ID --schedule-generation GEN` 准备严格限定的 Outbox 意图，通过 `outbox-drain --once --id OUTBOX_ID` 投递并精确回查。
+3. **SYN-ACK：** 独立平台身份 `crewquay-platform` 在 `deployment.syn_ack` 中下发随机 challenge。原生 `tick --light` 自动持久化事件，并核对 actor、runId、nonce、event ID、cursor、platform sender 和 300 秒服务端窗口，生成 `ack_work_id`。平台认证事件并不能单独证明 HATCH 确实自然唤醒。
+4. **ACK：** Agent 领取 `ack_work_id` 的新工作租约，运行 `cq deployment-stage-ack`，由 Patrol 从受保护 SQLite 读取 challenge、经 Outbox 投递。只有服务端权威状态 `protocol_verified`、三条不同 message ID 与 ACK `confirmed` 均可核验才算**平台协议完成**。
+5. **真实宿主验收：** 还必须核对真实 HATCH 自然 60 秒触发、`host-wakeup-prepare → wake() → wakeup-ack → wakeup-execution` 与各步独立回执；`deployment-status` 当前不自动授予 `DEPLOYMENT_VERIFIED`，始终显示 `deployment_verified=false` 直到独立宿主验收齐备，防止“只发 HTTP 就自称部署成功”。
 
-**现有 CrewQuay 平台源码尚未证明有自动的 SYN-ACK/最终验收服务。** 不允许假设其存在；如果找不到平台控制会话的合法受信任应答能力，或 5 分钟内无法完成任一步骤，必须在 `POST /api/v1/bugs` 报告对应真实 Bug，保留 Bug ID 与脱敏证据，状态为 `DEPLOYMENT_BLOCKED/FAILED`。如果 Bug 接口也失败，再在已授权的 Owner/运维通道报告，不可伪称已经提报或部署成功。**具体报文、授权检查、失败码和报 Bug 结构见独立协议文档。**
+**失败必须留痕：** 平台确实不支持握手、或者 300 秒内缺最终 ACK 时，Patrol 持久化失败码并生成 `bug_work_id`。获准 Worker 使用真实 Scheduler + Queue 领取，执行 `cq deployment-stage-bug` 并 `outbox-drain`；只有平台的精确 `BUG-…` 回查才记录 `bug_id`。网络未知不得换幂等键重复发，Bug 工作尚未执行不能声称已经提交。详细 CLI 与边界见 [原生部署握手指南](DEPLOYMENT_HANDSHAKE.md)。
 
 ## 2. 先检查，后行动（只读路径）
 
