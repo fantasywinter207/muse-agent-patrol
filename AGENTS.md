@@ -1,4 +1,8 @@
 # Patrol repository contributor rules
+- **V3 is the sole active Patrol repository and runtime.** Use `fantasywinter207/muse-agent-patrol` `main` for all new Agent/Hook/Worker operations; do not run or install an older v2 Patrol, legacy 10-minute cron/watchdog, or old standalone 5-minute Executor alongside v3.
+- The required runtime polling cadence is exactly **one externally scheduled 60-second Light Tick Hook**, not `normal_scan_seconds=600` or a new timer. GitHub updates do not change external host task schedules; report host deployment/60-second timestamps separately.
+- Preserve existing SQLite history, Outbox idempotency and on-disk migration support; removing legacy *runtimes* does not authorize deleting migration code, rewriting old rows, or replaying `unknown` writes.
+- True autonomous Muse replies require an actual host wake and verified `wakeup-ack` bridge; in poll-only mode, do not claim Agent autonomy or restore any legacy worker as a workaround.
 - This repository is the patrol client, not the CrewQuay server.
 - For runtime operations, read the root README.md section "Agent 使用手册（从零到完成一轮工作）" before invoking CLI actions; it defines the end-to-end Agent handoff and confirmation flow.
 - Read patrol/README.md then the owning component README and index before edits.
