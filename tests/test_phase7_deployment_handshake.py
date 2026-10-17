@@ -1,7 +1,10 @@
 """Native CrewQuay deployment protocol, tested with isolated SQLite and fake HTTP."""
 import json
+import contextlib
+import io
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +13,7 @@ from patrol.components.config.index import Config
 from patrol.components.deployment.index import Deployment
 from patrol.components.executor.index import ActionSender
 from patrol.components.outbox.index import Outbox
+from patrol.components.runtime.index import main
 from patrol.components.persistence.index import Database, StaleLease
 from patrol.components.queue.index import Queue
 from patrol.components.scheduling.index import Scheduler
@@ -157,6 +161,45 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn("PLATFORM_HANDSHAKE_UNSUPPORTED",json.loads(saved["payload"])["title"])
         self.assertIsNone(self.deploy.get(missing["id"])["bug_id"])
         self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox WHERE action='deployment_bug'")[0]["n"],1)
+
+    def test_hatch_ensure_reuses_same_sha_and_bootstraps_upgrade(self):
+        conf=Path(self.db.path).parent/"enabled.json"
+        conf.write_text(json.dumps({"database":str(self.db.path),
+                                    "allow_writes":True}),encoding="utf-8")
+        class Capabilities:
+            requested=[]
+            def __init__(self,*args,**kwargs): pass
+            def request(self,method,path):
+                self.requested.append(path)
+                return Response(200,{"protocolVersion":"1","supported":True,
+                    "actorId":"muse","synAckEventType":"deployment.syn_ack",
+                    "platformSenderId":"crewquay-platform","windowSeconds":300})
+        out=io.StringIO()
+        with patch("patrol.components.runtime.composition.cli.Client",Capabilities), \
+             patch("patrol.components.runtime.composition.cli.credential_provider",
+                   lambda cfg:lambda:"fake"), \
+             contextlib.redirect_stdout(out):
+            exit_code=main(["--config",str(conf),"deployment-ensure",
+                            "--repo-sha","cac7688e"])
+        self.assertEqual(exit_code,0)
+        self.assertEqual(Capabilities.requested,[])
+        self.assertEqual(json.loads(out.getvalue())["status"],"already_initialized")
+        out=io.StringIO()
+        with patch("patrol.components.runtime.composition.cli.Client",Capabilities), \
+             patch("patrol.components.runtime.composition.cli.credential_provider",
+                   lambda cfg:lambda:"fake"), \
+             contextlib.redirect_stdout(out):
+            code=main(["--config",str(conf),"deployment-ensure",
+                       "--repo-sha","abcdef0123456789"])
+        self.assertEqual(code,0,out.getvalue())
+        result=json.loads(out.getvalue())
+        self.assertEqual(result["repo_sha"],"abcdef0123456789")
+        self.assertEqual(Capabilities.requested,
+                         ["/api/v1/agent/deployment/capabilities"])
+        old=self.db.read("SELECT state,failure_code FROM deployment_runs WHERE id=?",
+                         (self.run["id"],))[0]
+        self.assertEqual(old["failure_code"],"SUPERSEDED_BY_UPGRADE")
+        self.assertEqual(old["state"],"failed")
 
     def test_restart_idempotent_and_actor_isolation(self):
         again=self.deploy.start(1002,"cac7688e")
