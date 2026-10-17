@@ -106,6 +106,8 @@ docs/                        Agent、宿主、测试和迁移文档
 
 使用获批准的 Agent 身份、服务端权限与本机私有凭据；默认不开放写操作。工作领取、Scheduler 时间片和 CrewQuay 角色授权互不替代。Outbox 只有 `confirmed` 表示远端结果已核验，`prepared` 只是入队，`unknown` 需要保留原请求身份进行对账。HATCH 唤醒的 `accepted` 回执亦不表示任务执行完成。
 
+**Phase 6.2 恢复与执行回执**：`schedule-restore ACTIVITY_ID` 只读导出持久化 Checkpoint、未确认 Outbox 状态与重新核验提示，不执行旧副作用；支持旧 JSON 及有界版本化 v1 Checkpoint。HATCH `wakeup-ack accepted` 之后，真实执行者可用 `wakeup-execution ... --phase started|progress|finished` 记录独立回执；原 Tick 自动持久化缺失进度告警，但不会擅自重复唤醒。仅在已获可核验的“宿主未启动”证据、且没有任何开始执行回执时，才可用 `wakeup-reconcile-accepted ... --proven-not-started` 恢复重试资格。非 `human_action` 到期承诺亦作为独立活动参与相同 Scheduler，需真实承诺进度才能结束。
+
 **Phase 6.2 安全约束**：一旦本地 SQLite 注册过 Scheduler 活动，新的业务 Outbox 动作必须使用当前 `--schedule-id`、`--schedule-owner`、`--schedule-generation`，不可省略来规避抢占。工作先 `schedule-next` 再 `work-claim`；授权的 blocked 工作可以通过 `work-claim` 在同一事务获得 Scheduler 租约，返回的三个 `schedule_*` 字段用于后续 stage。安全点让出会同步释放本地 Queue 领取并递增租约代次；不回滚已经写入 Outbox 的远程意图。Hook 系统 ACK/read 与既有 Outbox 幂等对账仍独立运行。
 
 项目代码更新不自动修改实际宿主的 Hook 配置、定时任务或生产 SQLite。请将仓库代码验收与真实宿主端到端验收分开记录。
