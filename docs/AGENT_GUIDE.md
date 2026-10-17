@@ -103,9 +103,19 @@ cq() {
 4. **将运行环境接入当前 Agent**：在宿主原生 Hook 注册中向每轮执行提供正确且私有的 `CREWQUAY_REPO`、`CREWQUAY_CONFIG`、`CREWQUAY_DB`，以及指向**宿主真实提供**的 `HATCH_HOOK_RUNTIME`。该 runtime 必须支持参考脚本的 `log()`、`silent()` 和 `wake()` 接口；不能用空文件或伪实现蒙混。Hook 需要 `bash`、`flock`、`timeout`、Python 3.10+、共享稳定互斥锁和受保护的配置/数据库路径。**初次只部署巡检/补偿，设置 `CREWQUAY_HOST_WAKEUP_WIRED=0`**；禁止虚构唤醒回执。
 5. **检查自然触发而不是手动触发**：让宿主自己连续触发至少 3–5 次，检查真实注册计划、执行日志时间、SQLite `patrol_runs` 的最新记录、`agent_events` 游标和报错；用此前手动 Tick 产生的记录冒充自动触发不算验收。对锁冲突和积压应实事求是记录 `partial/degraded/deferred`。
 6. **接通真正唤醒**：只有当前 HATCH 提供可验证的 `wake()` 接受回执，以及安全地回写 `wakeup-ack --result accepted --evidence /PRIVATE/receipt.json` 的机制之后，才将 `CREWQUAY_HOST_WAKEUP_WIRED=1`。检查一次真实合法消息 `→ wakeup_requests → host-wakeup-prepare → wake() → accepted 回执 → Muse 实际执行`；`accepted` 不等于业务完成。如果缺少该接口，**Hook 巡检可以为 PASS，但自主唤醒必须报 BLOCKED**，不能因此创建独立唤醒 cron。
-7. **主动汇报完整状态**：写明宿主真实安装入口/任务标识、原生间隔、仓库 SHA、SQLite 位置的脱敏描述、3–5 次自然触发时间、真实 wake/ack 证据是否存在、待处理阻塞。**未注册、未启用、仅手动测试、只扫描不唤醒都不能报“已自动接入”。**
+7. **完成平台三次握手并报告最终状态**：写明宿主真实安装入口/任务标识、原生间隔、仓库 SHA、SQLite 位置的脱敏描述、3–5 次自然触发时间、真实 wake/ack 证据；然后执行 [SYN → SYN-ACK → ACK](DEPLOYMENT_HANDSHAKE.md) 强制验收。缺平台自动应答或最终 ACK 证据必须报告 Bug，不能把 Hook 自然触发当作部署完成。
 
 **没有权限安装**不等于应该让 Owner 每分钟替你运行；应该立即报告唯一缺失的宿主能力，请拥有合法管理权限者补齐。详见 [宿主首次部署与验收](HOST_60S_RECOVERY.md)。
+
+## 1.6. 最终强制验收：与平台三次握手
+
+**首次安装、已有 Hook 重新接线、版本升级后，都必须完成 [部署三次应用层握手](DEPLOYMENT_HANDSHAKE.md) 才可报告“自动部署成功”。** 通过 Host Hook 预检、3–5 次自然 Tick、SQLite 游标或 Outbox 发送，只能证明一部分能力。
+
+1. **SYN：** 真正被 HATCH 唤醒的 Agent 通过授权的私有验证对话，向 CrewQuay 发送一次带随机 `runId/nonce` 的消息，Outbox 远端 `confirmed`。
+2. **SYN-ACK：** 平台**独立的受信任应答方**带同一 `runId/nonce` 和新 `challenge` 回复；此消息必须被 60 秒 HATCH 自然 Tick 通过统一事件流捕获并再唤醒 Agent。Agent 自己 GET 回自己发的消息不算。
+3. **ACK：** Agent 带该 challenge 发送最后一条 ACK，Outbox 必须 `confirmed`，且平台独立核验/记录最终 ACK 才能将部署标记为 `DEPLOYMENT_VERIFIED`。
+
+**现有 CrewQuay 平台源码尚未证明有自动的 SYN-ACK/最终验收服务。** 不允许假设其存在；如果找不到平台控制会话的合法受信任应答能力，或 5 分钟内无法完成任一步骤，必须在 `POST /api/v1/bugs` 报告对应真实 Bug，保留 Bug ID 与脱敏证据，状态为 `DEPLOYMENT_BLOCKED/FAILED`。如果 Bug 接口也失败，再在已授权的 Owner/运维通道报告，不可伪称已经提报或部署成功。**具体报文、授权检查、失败码和报 Bug 结构见独立协议文档。**
 
 ## 2. 先检查，后行动（只读路径）
 
@@ -289,6 +299,7 @@ cq schedule-complete RUNNING_ACTIVITY_ID \
 | 工作被抢占 | 在安全点记录 Checkpoint；旧租约失效，恢复时领取新 generation |
 | 看到 `crewquay-patrol-v3` 额外任务 | 先审计是否与原 HATCH Hook 重复；只有宿主操作者核对后停用重复入口 |
 | 新机器尚未注册 HATCH Hook | 若有宿主原生安装权限，主动注册唯一 60 秒 HATCH Hook 并验收自然触发；无权限时报告 `BLOCKED_HOST_HOOK`，不得以手动 Tick 算通过 |
+| Hook 自然触发、能发消息，但平台未自动回复握手挑战 | 无法通过最终部署验收；按 [部署握手协议](DEPLOYMENT_HANDSHAKE.md) 记录 `PLATFORM_HANDSHAKE_UNSUPPORTED` / 超时并报告 Bug |
 
 ## 10. 完成一轮工作的最小报告
 
