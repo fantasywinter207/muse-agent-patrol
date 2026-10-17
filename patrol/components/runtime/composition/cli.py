@@ -12,6 +12,7 @@ from datetime import datetime
 from dataclasses import replace
 from pathlib import Path
 from ...config.index import load_config
+from ...deployment import Deployment
 from ...host.index import HostHandoff
 from ...migration.index import migrate_legacy
 from ...outbox.index import Outbox
@@ -59,6 +60,19 @@ def parser():
     sub.add_parser("doctor")
     sub.add_parser("status")
     sub.add_parser("platform-catalog")
+    a=sub.add_parser("deployment-start")
+    a.add_argument("--repo-sha",required=True,
+                   help="actual installed Patrol commit SHA (7-40 lowercase hex)")
+    a=sub.add_parser("deployment-status")
+    a.add_argument("--id")
+    sub.add_parser("deployment-reconcile")
+    for phase in ("syn","ack"):
+        a=sub.add_parser("deployment-stage-"+phase)
+        a.add_argument("id",help="durable deployment run ID, NOT handshake ID")
+        a.add_argument("--owner",required=True)
+        a.add_argument("--schedule-id",required=True)
+        a.add_argument("--schedule-generation",type=int,required=True)
+        a.add_argument("--producer-id")
     a=sub.add_parser("social-sync")
     a.add_argument("--limit",type=int,default=10)
     a.add_argument("--max-new",type=int,default=3)
@@ -281,6 +295,38 @@ def main(argv=None):
                 result=migrate_legacy(db,args.directory,now,args.confirm_stopped)
             elif args.command=="backup":
                 result={"backup":db.backup(args.destination),"integrity":"ok"}
+            elif args.command=="deployment-start":
+                if not cfg.allow_writes:
+                    raise ValueError("deployment requires authorized outbound write configuration")
+                bound=db.read("SELECT value FROM meta WHERE key='actor'")
+                if not bound:
+                    raise ValueError("verify local CrewQuay actor before starting a handshake")
+                client=Client(cfg,credential_provider(cfg))
+                reply=client.request("GET","/api/v1/agent/deployment/capabilities")
+                if (reply.status!=200 or not isinstance(reply.body,dict) or
+                        reply.body.get("supported") is not True or
+                        reply.body.get("protocolVersion")!="1" or
+                        reply.body.get("actorId")!=bound[0]["value"] or
+                        reply.body.get("synAckEventType")!="deployment.syn_ack" or
+                        reply.body.get("platformSenderId")!="crewquay-platform" or
+                        reply.body.get("windowSeconds")!=300):
+                    result={"status":"PLATFORM_HANDSHAKE_UNSUPPORTED",
+                            "deployment_verified":False}
+                else:
+                    result=Deployment(db).start(now,args.repo_sha)
+            elif args.command=="deployment-status":
+                result=Deployment(db).get(args.id)
+            elif args.command=="deployment-reconcile":
+                result={"local_transitions":Deployment(db).reconcile(now),
+                        "remote_action_issued":False}
+            elif args.command in ("deployment-stage-syn","deployment-stage-ack"):
+                if not cfg.allow_writes:
+                    raise ValueError("deployment outbound writes disabled")
+                phase=args.command[len("deployment-stage-"):]
+                result=Deployment(db).stage(args.id,phase,now,
+                    {"id":args.schedule_id,"owner":args.owner,
+                     "generation":args.schedule_generation},
+                    producer_id=args.producer_id)
             elif args.command=="social-sync":
                 if not 1<=args.limit<=20 or not 1<=args.max_new<=3:
                     raise ValueError("social-sync limit must be 1..20 and max-new 1..3")
