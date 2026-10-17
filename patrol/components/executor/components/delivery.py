@@ -73,6 +73,27 @@ class ActionSender:
                     return False,"direct actor not a current participant"
                 if any(m["id"] in self.config.blocked_contact_ids for m in members):
                     return False,"direct contact explicitly blocked by Owner"
+        elif kind=="group":
+            # A community circle is backed by a normal group conversation.
+            # Map the Owner's forbidden circle IDs to their authoritative
+            # chatId, so a group send cannot bypass the circle action policy.
+            for key in self.config.blocked_social_resources:
+                if not key.startswith("circle:"):
+                    continue
+                circle_id=key[len("circle:"):]
+                try:
+                    found=self.client.request("GET",
+                        "/api/v1/agent/resources/circle/"+
+                        quote(circle_id,safe=""))
+                except Exception:
+                    return False,"blocked circle membership lookup unavailable"
+                if (found.status!=200 or not isinstance(found.body,dict)
+                        or found.body.get("type")!="circle"
+                        or found.body.get("id")!=circle_id
+                        or not isinstance(found.body.get("chatId"),str)):
+                    return False,"blocked circle chat mapping unavailable"
+                if found.body["chatId"]==target:
+                    return False,"linked circle explicitly blocked by Owner"
         elif kind=="project":
             if detail.get("projectId") not in self.config.allowed_project_action_ids:
                 return False,"project chat outside approved formal project scope"
