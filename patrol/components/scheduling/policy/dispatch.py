@@ -103,6 +103,10 @@ class Scheduler:
                          WHERE w.type='human_action' AND w.status IN
                            ('pending','retry_wait','blocked','needs_approval')
                          ORDER BY CASE WHEN a.id IS NULL THEN 0 ELSE 1 END,
+                             CASE WHEN e.source='messages' AND
+                                   COALESCE(ms.muse_score,ms.base_score) IS NOT NULL
+                                  THEN COALESCE(ms.muse_score,ms.base_score)
+                                  ELSE w.priority END DESC,
                              COALESCE(a.last_updated,w.created_at),w.created_at
                          LIMIT ?""",(limit,)).fetchall()
             for row in rows:
@@ -116,8 +120,11 @@ class Scheduler:
                 deadline=(row["promise_due"] if row["promise_due"] is not None else
                           row["due_at"] if row["due_at"] is not None else
                           row["start_by"] if score>=70 else None)
-                existing=c.execute("SELECT id,status FROM schedule_activities WHERE logical_key=?",
-                                   (key,)).fetchone()
+                # A work item has a unique Scheduler activity even when a
+                # previous operator registered it under a custom logical key.
+                # Looking up only "work:<id>" would attempt a duplicate insert.
+                existing=c.execute("SELECT id,status FROM schedule_activities WHERE work_id=?",
+                                   (row["id"],)).fetchone()
                 if existing:
                     if existing["status"] in ("ready","suspended","running"):
                         c.execute("""UPDATE schedule_activities
@@ -260,18 +267,66 @@ class Scheduler:
         with self.db.transaction() as c:
             return self._assess_tx(c,now,False)
 
-    def dispatch(self,owner,now):
-        """Grant one local time slice or request a safe-point preemption."""
+    def dispatch(self,owner,now,for_work_id=None):
+        """Refresh actionable work then grant the top eligible time slice.
+
+        An optional work ID is a *selection guard*, not a priority or
+        authorization override. An active lease must yield or expire normally.
+        If a different candidate outranks the requested work, report why and
+        leave it untouched. This prevents an operator from accidentally
+        claiming a low-priority activity while replying to urgent messages.
+        """
         if not isinstance(owner,str) or not 1<=len(owner)<=128:
             raise ValueError("nonempty bounded worker owner required")
+        if for_work_id is not None and (
+                not isinstance(for_work_id,str) or not 1<=len(for_work_id)<=128):
+            raise ValueError("bounded local work ID required")
+        # tick --light and real Host wakeup are separate processes. Do not
+        # assume the latest human_action has already been imported into the
+        # Scheduler when a just-awakened worker calls schedule-next.
+        refreshed=self.sync_work(now,limit=500)
         with self.db.transaction() as c:
             expired=self._recover(c,now)
             view=self._assess_tx(c,now,True)
+            info={}
+            selected=None
+            if for_work_id is not None:
+                work=c.execute("""SELECT id,type,status,next_action_at,lease_owner,
+                    lease_until FROM work_items WHERE id=?""",
+                    (for_work_id,)).fetchone()
+                if not work or work["type"]!="human_action":
+                    info={"requested_work_id":for_work_id,
+                          "hint_status":"unknown_or_nonhuman_work"}
+                else:
+                    activity=c.execute("""SELECT * FROM schedule_activities
+                        WHERE work_id=?""",(for_work_id,)).fetchone()
+                    if not activity:
+                        reason="activity_not_registered"
+                    elif activity["status"] not in ACTIVE:
+                        reason="activity_"+activity["status"]
+                    elif work["status"] not in ("pending","retry_wait"):
+                        reason="work_"+work["status"]
+                    elif work["next_action_at"]>now:
+                        reason="work_not_due"
+                    else:
+                        selected=dict(activity)
+                        reason="eligible"
+                    info={"requested_work_id":for_work_id,
+                          "hint_status":reason,
+                          "requested_activity":self._public(activity,now) if activity else None,
+                          "work_status":work["status"],
+                          "work_next_action_at":work["next_action_at"]}
             if view["running"]:
-                return {**view,"granted":False,"lease_recovered":expired}
+                return {**view,**info,"granted":False,
+                        "lease_recovered":expired,"activities_registered":refreshed}
             best=self._best(self._ready(c,now),now)
-            if best is None:
-                return {**view,"granted":False,"lease_recovered":expired}
+            if best is None or (for_work_id is not None and selected is None):
+                return {**view,**info,"granted":False,
+                        "lease_recovered":expired,"activities_registered":refreshed}
+            if for_work_id is not None and selected["id"]!=best["id"]:
+                return {**view,**info,"granted":False,
+                        "hint_status":"outscored_by_other_activity",
+                        "lease_recovered":expired,"activities_registered":refreshed}
             n=c.execute("""UPDATE schedule_activities SET status='running',
                 lease_owner=?,lease_version=lease_version+1,
                 lease_until=?,slice_until=?,last_started_at=?,
@@ -284,7 +339,8 @@ class Scheduler:
                 raise StaleLease("another scheduler dispatched this activity")
             active=self._current(c)
             return {"granted":True,"activity":self._public(active,now),
-                    "lease_recovered":expired,
+                    **info,"lease_recovered":expired,
+                    "activities_registered":refreshed,
                     "warning":"scheduler lease is not work-claim or CrewQuay authorization"}
 
     @staticmethod
