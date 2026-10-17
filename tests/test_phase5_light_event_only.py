@@ -1,6 +1,7 @@
 """Phase 5 event-only Light Tick tests with fake HTTP + temp SQLite."""
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from patrol.components.config.index import Config
@@ -65,6 +66,48 @@ class EventOnlyLightTests(unittest.TestCase):
         self.assertFalse(any("/chats/" in p or "/inbox" in p or "/projects/" in p or
                              "/api/v1/events" in p or "/tasks/" in p for _,p in fake.calls))
         return report,fake.calls
+
+    def test_light_uses_five_event_page_size_even_when_server_rejects_ten(self):
+        class LimitSensitive(Fake):
+            def request(self, method, path, *args):
+                if path.startswith("/api/v1/agent/events?"):
+                    from urllib.parse import parse_qs, urlsplit
+                    count=int(parse_qs(urlsplit(path).query)["limit"][0])
+                    if count>=10:
+                        raise AssertionError("production disconnect: event page >=10")
+                return super().request(method,path,*args)
+        client=LimitSensitive([Response(200,page([event()]))])
+        report=Tick(self.db,self.cfg,client=client,clock=lambda:1000).run(light=True)
+        self.assertEqual(report["status"],"ok",report)
+        paths=[path for _,path in client.calls if "/agent/events?" in path]
+        self.assertEqual(len(paths),1)
+        self.assertIn("limit=5",paths[0])
+        self.assertEqual(self.db.read(
+            "SELECT received FROM sync_cursors WHERE source='agent_events'"
+        )[0]["received"],"1")
+
+    def test_page_count_and_event_page_size_are_independent(self):
+        self.cfg=replace(self.cfg,light_events_page_size=3,
+                         light_max_pages_per_source=2)
+        responses=[
+            Response(200,page([event()],to="2",has_more=True,next_cursor="1")),
+            Response(200,page([event(seq=2,message_id="msg2")],
+                              after="1",to="2",next_cursor="2"))]
+        result,calls=self.tick(responses)
+        self.assertEqual(result["status"],"ok",result)
+        feed=[path for _,path in calls if "/agent/events?" in path]
+        self.assertEqual(len(feed),2)
+        self.assertTrue(all("limit=3" in path for path in feed),feed)
+        self.assertIn("to=2",feed[1])
+        self.assertEqual(self.db.read(
+            "SELECT received FROM sync_cursors WHERE source='agent_events'"
+        )[0]["received"],"2")
+
+    def test_event_page_size_validation(self):
+        for invalid in [0,101,True,2.5,"5"]:
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    Config(light_events_page_size=invalid)
 
     def test_chat_task_project_room_messages_share_feed_and_score(self):
         scenarios=[("chat","owner","chat.message.created"),
