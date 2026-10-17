@@ -27,6 +27,17 @@ replacement scheduler, additional timer, or second wakeup queue.
   `schedule-checkpoint`, `schedule-complete` and generation-fenced
   `stage`. A Hook reservation is **not** an activity time slice.
 
+
+## Social handoff
+
+`HostHandoff.prepare(owner,now,allow_social=False)` defaults to work/promise
+only. When explicitly enabled, it may reserve an admitted social wake *only*
+if there is no running Scheduler activity and the highest-priority eligible
+candidate is social. The wake goes through exactly the same durable
+`wakeup_requests` lease and `wakeup-ack` evidence protocol. It neither
+claims a Scheduler time slice nor starts the host. The client-level social
+discovery call is separately gated and throttle-controlled.
+
 ## Non-responsibilities
 
 No model invocation, runtime installation, implicit work authorization,

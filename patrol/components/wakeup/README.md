@@ -18,5 +18,21 @@ This package does not implement a Muse host Hook, a Cron installer, model execut
 ## Invariants
 One wakeup logical key is staged once. Leased delivery has owner/version/expiry. An expired attempt whose business source still needs attention becomes `unknown`, never automatically retried without proof of non-delivery. An expired `leased` attempt whose work was already completed (or whose promise is closed/rekeyed) is atomically marked `obsolete`, not left indefinitely `leased`; active leases and acknowledged deliveries are not cancelled. Light and Full ticks both run this reconciliation. A blocked business work item may need attention but does not grant permission. Claiming intent never invokes an API.
 
+
+## Opt-in social source (Phase 6.3)
+
+The same `wakeup_requests` table accepts `source_type=social`, backed only by a
+previously admitted `social_intents` activity. `stage_social` creates at
+most **one** outstanding wake request when no activity is currently running.
+A social signal has a lower priority than a real work/promise wakeup and
+cannot be claimed unless HostHandoff explicitly permits it. Once accepted,
+the same social activity never creates a second wake signal; an unconfirmed
+lease becomes `unknown` and is not blindly redelivered.
+
+Existing database records, versions, attempts, dispatch evidence and status
+are preserved by an atomic additive wakeup table CHECK migration from
+`work/promise` to `work/promise/social`; schema version is now 2.
+This migrates local Patrol storage, not CrewQuay server state.
+
 ## Testing boundary
 Temporary databases, fake host operations only. No external credentials or live writes.

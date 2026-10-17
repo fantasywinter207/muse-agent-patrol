@@ -62,6 +62,8 @@ def parser():
     a=sub.add_parser("social-sync")
     a.add_argument("--limit",type=int,default=10)
     a.add_argument("--max-new",type=int,default=3)
+    a.add_argument("--if-idle-due",action="store_true",
+                   help="Hook-only: at most one idle discovery per 30 minutes")
     a=sub.add_parser("social-detail")
     a.add_argument("id")
     a=sub.add_parser("platform-events")
@@ -142,6 +144,7 @@ def parser():
     a.add_argument("--reason",required=True)
     a.add_argument("--evidence",required=True)
     a=sub.add_parser("host-wakeup-prepare")
+    a.add_argument("--include-social",action="store_true")
     a.add_argument("--owner",required=True,
                    help="approved HATCH Hook identifier, not a platform actor")
     a=sub.add_parser("wakeup-stage")
@@ -263,15 +266,24 @@ def main(argv=None):
             elif args.command=="social-sync":
                 if not 1<=args.limit<=20 or not 1<=args.max_new<=3:
                     raise ValueError("social-sync limit must be 1..20 and max-new 1..3")
-                # Opt-in read-only discovery; this is never called by Light Tick.
-                client=Client(cfg,credential_provider(cfg))
-                remote=client.request("GET","/api/v1/agent/social/opportunities?limit="+str(args.limit))
-                if remote.status==200:
-                    result=SocialOpportunities(db).admit(remote.body,now,args.max_new)
+                # Explicit manual discovery is read-only, even if writes are
+                # disabled. Hook idle auto-discovery requires full opt-in.
+                auto_allowed=(cfg.allow_writes and cfg.allow_community_actions
+                    and any(name.startswith("community.") for name
+                            in cfg.allowed_platform_actions))
+                if args.if_idle_due and not auto_allowed:
+                    result={"status":"disabled","remote_action_issued":False}
+                elif args.if_idle_due and not SocialOpportunities(db).reserve_idle_discovery(now):
+                    result={"status":"not_due_or_busy","remote_action_issued":False}
                 else:
-                    result={"status":"deferred","remote_status":remote.status,
-                            "model_invoked":False,"host_woken":False,
-                            "remote_action_issued":False}
+                    client=Client(cfg,credential_provider(cfg))
+                    remote=client.request("GET","/api/v1/agent/social/opportunities?limit="+str(args.limit))
+                    if remote.status==200:
+                        result=SocialOpportunities(db).admit(remote.body,now,args.max_new)
+                    else:
+                        result={"status":"deferred","remote_status":remote.status,
+                                "model_invoked":False,"host_woken":False,
+                                "remote_action_issued":False}
             elif args.command=="social-detail":
                 result=SocialOpportunities(db).details(args.id)
             elif args.command=="platform-catalog":
@@ -375,7 +387,12 @@ def main(argv=None):
                                               args.reason,evidence(args.evidence),now)
             
             elif args.command=="host-wakeup-prepare":
-                result=HostHandoff(db,cfg.lease_seconds).prepare(args.owner,now)
+                allow_social=(args.include_social and cfg.allow_writes and
+                    cfg.allow_community_actions and any(
+                        name.startswith("community.") for name
+                        in cfg.allowed_platform_actions))
+                result=HostHandoff(db,cfg.lease_seconds).prepare(
+                    args.owner,now,allow_social=allow_social)
             elif args.command=="wakeup-stage":
                 result={"staged":Wakeups(db,cfg.lease_seconds).stage(now,threshold=cfg.wakeup_min_score),
                         "host_called":False}

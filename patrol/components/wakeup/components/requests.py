@@ -48,15 +48,60 @@ class Wakeups:
                 added+=n
         return added
 
+    def stage_social(self, now, activity_id):
+        """Put ONE already-admitted, idle social activity on the SAME wake queue.
+
+        No model invocation and no outbound API call. A prior accepted or
+        ambiguous social wake blocks further social wakeups until the
+        earlier activity terminates, preventing stacked idle wake storms.
+        """
+        with self.db.transaction() as c:
+            running=c.execute("SELECT 1 FROM schedule_activities "
+                              "WHERE status='running' LIMIT 1").fetchone()
+            if running:
+                return 0
+            outstanding=c.execute("""SELECT 1 FROM wakeup_requests w
+                JOIN schedule_activities a ON a.id=w.source_id
+                WHERE w.source_type='social'
+                  AND w.status IN ('pending','retry_wait','leased','unknown','accepted')
+                  AND a.status IN ('ready','running','suspended')
+                LIMIT 1""").fetchone()
+            if outstanding:
+                return 0
+            act=c.execute("""SELECT a.id,s.selection_score FROM schedule_activities a
+                JOIN social_intents s ON s.activity_id=a.id
+                WHERE a.id=? AND a.status IN ('ready','suspended')
+                  AND NOT EXISTS (SELECT 1 FROM wakeup_requests w
+                                  WHERE w.source_type='social' AND w.source_id=a.id)
+                LIMIT 1""",(activity_id,)).fetchone()
+            if not act:
+                return 0
+            return c.execute("""INSERT INTO wakeup_requests(
+                id,logical_key,source_type,source_id,priority,reason,
+                created_at,next_attempt_at)
+                VALUES(?,?,'social',?,?,?, ?,?)
+                ON CONFLICT(logical_key) DO NOTHING""",
+                (new_id(),"social:"+act["id"],act["id"],
+                 min(35,act["selection_score"]),
+                 "bounded idle social activity for host decision",now,now)).rowcount
+
     def _source_alive(self, c, row):
         if row["source_type"]=="work":
             return bool(c.execute("""SELECT 1 FROM work_items WHERE id=?
                 AND type='human_action' AND status IN
                 ('pending','retry_wait','blocked','needs_approval')""",
                 (row["source_id"],)).fetchone())
-        return bool(c.execute("""SELECT 1 FROM promises WHERE id=? AND status!='done'
+        if row["source_type"]=="social":
+            return bool(c.execute("""SELECT 1 FROM schedule_activities a
+                JOIN social_intents s ON s.activity_id=a.id
+                WHERE a.id=? AND a.status IN ('ready','suspended')
+                  AND a.logical_key IS NOT NULL""",
+                (row["source_id"],)).fetchone())
+        if row["source_type"]=="promise":
+            return bool(c.execute("""SELECT 1 FROM promises WHERE id=? AND status!='done'
                 AND ('promise:'||id||':'||CAST(next_action_at AS TEXT))=?""",
                 (row["source_id"],row["logical_key"])).fetchone())
+        return False
 
     def export(self, now, limit=50):
         if type(limit) is not int or not 1<=limit<=200:
@@ -128,7 +173,8 @@ class Wakeups:
                     "source_type":x["source_type"],"source_id":x["source_id"],
                     "host_called":False}
 
-    def claim_next(self, owner, now, limit=100):
+    def claim_next(self, owner, now, limit=100, allow_social=False,
+                   social_activity_id=None):
         """Atomically reserve the highest-priority due host signal.
 
         Unlike export -> claim, selection and lease acquisition happen inside
@@ -141,7 +187,10 @@ class Wakeups:
         with self.db.transaction() as c:
             rows=c.execute("""SELECT * FROM wakeup_requests
                 WHERE status IN ('pending','retry_wait') AND next_attempt_at<=?
-                ORDER BY priority DESC,created_at,id LIMIT ?""",(now,limit)).fetchall()
+                  AND (source_type!='social' OR
+                       (? AND source_id=?))
+                ORDER BY priority DESC,created_at,id LIMIT ?""",
+                (now,1 if allow_social else 0,social_activity_id or "",limit)).fetchall()
             for row in rows:
                 if not self._source_alive(c,row):
                     c.execute("""UPDATE wakeup_requests SET status='obsolete',

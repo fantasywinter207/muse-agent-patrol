@@ -2,8 +2,8 @@
 # Reference HATCH Hook, not installed/enabled by this repository.
 # Hook: Light Tick + independent action compensation + fenced Muse wake.
 # Requires prior host approval for credentialed polling and authorized writes.
-# Fits the current ~60 s Hook script budget (25 s light + 25 s drain, plus
-# shell/SQLite overhead); long readbacks may require another compensation turn.
+# Bounded Hook: light <=21 s, drain <=20 s, optional discovery <=6 s,
+# wake reservation <=8 s. No second timer or cron.
 set -euo pipefail
 source "${HATCH_HOOK_RUNTIME:?host Hook runtime required}"
 
@@ -12,6 +12,11 @@ DB="${CREWQUAY_DB:?sqlite path required}"
 CONFIG="${CREWQUAY_CONFIG:?config required}"
 LOCK="${CREWQUAY_HOOK_LOCK:-${HOME}/hooks/state/crewquay-phase3-hook.lock}"
 HOOK_OWNER="${CREWQUAY_HOOK_OWNER:-crewquay-hatch-hook}"
+SOCIAL_IDLE="${CREWQUAY_SOCIAL_IDLE_ENABLED:-0}"
+if [[ "$SOCIAL_IDLE" != "0" && "$SOCIAL_IDLE" != "1" ]]; then
+  silent "invalid social wake setting" '{"status":"invalid_config"}'
+  exit 0
+fi
 mkdir -p "$(dirname "$LOCK")"
 
 # This is separate from the stable CLI .tick.lock: never hold the CLI lock
@@ -21,17 +26,26 @@ if flock -n 9; then
   # No raw stdout/stderr in Hook logs; external content or stack traces could
   # contain secrets. The CLI itself already stores structured run reports.
   TICK_EXIT=0
-  (cd "$REPO" && timeout 25s python3 -m patrol \
+  (cd "$REPO" && timeout 21s python3 -m patrol \
     --config "$CONFIG" --db "$DB" tick --light >/dev/null 2>&1) || TICK_EXIT=$?
   log "phase3 light tick exit=${TICK_EXIT}"
 
   # Pure Python Executor, not a Muse worker. Only verified, authorized actions
   # can POST. An unknown remote result is readback-checked, never blindly resent.
   DRAIN_EXIT=0
-  (cd "$REPO" && timeout 25s python3 -m patrol \
+  (cd "$REPO" && timeout 20s python3 -m patrol \
     --config "$CONFIG" --db "$DB" outbox-drain --once --lane any \
     --limit 3 >/dev/null 2>&1) || DRAIN_EXIT=$?
   log "phase3 executor compensation exit=${DRAIN_EXIT}"
+  # Optional idle social polling, gated by verified local config and
+  # a durable >=30-minute SQLite cadence. GET only, no model or POST.
+  if [ "$SOCIAL_IDLE" = "1" ]; then
+    SOCIAL_EXIT=0
+    (cd "$REPO" && timeout 6s python3 -m patrol \
+      --config "$CONFIG" --db "$DB" social-sync --if-idle-due \
+      --limit 10 --max-new 3 >/dev/null 2>&1) || SOCIAL_EXIT=$?
+    log "phase6 idle discovery exit=${SOCIAL_EXIT}"
+  fi
 else
   log "phase3 hook skipped: prior invocation still active"
   silent "previous Hook turn is still active" '{"status":"busy"}'
@@ -47,9 +61,13 @@ if [ ! -f "$DB" ]; then
   exit 0
 fi
 PREPARED=""
+SOCIAL_OPT=()
+if [ "$SOCIAL_IDLE" = "1" ]; then
+  SOCIAL_OPT=(--include-social)
+fi
 if ! PREPARED="$(cd "$REPO" && timeout 8s python3 -m patrol \
     --config "$CONFIG" --db "$DB" host-wakeup-prepare \
-    --owner "$HOOK_OWNER" 2>/dev/null)"; then
+    --owner "$HOOK_OWNER" "${SOCIAL_OPT[@]}" 2>/dev/null)"; then
   silent "wakeup reservation unavailable" '{"status":"deferred"}'
   exit 0
 fi
@@ -66,7 +84,7 @@ if [ "$DECISION" = "wake" ]; then
   # The host must explicitly acknowledge delivery with wakeup-ack and a
   # verifiable receipt. Return/exit from wake() is NOT proof of acceptance.
   # An unacknowledged lease expires to unknown, never blind redelivery.
-  wake "durable CrewQuay decision work reserved" "$PREPARED"
+  wake "durable CrewQuay activity reserved" "$PREPARED"
 else
   silent "no due unleased wakeup intent" '{"status":"idle"}'
 fi

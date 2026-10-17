@@ -27,6 +27,17 @@ CLI与有界tick组合。
 ## Testing boundary
 通过公开边界使用临时数据库、fake HTTP/WS和真实多进程故障场景核验；不读取真实凭据、不访问业务API。
 
+
+The existing Hook may **optionally** enable social idle discovery and
+wakeup via `CREWQUAY_SOCIAL_IDLE_ENABLED=1`, with explicit
+`allow_writes=true`, `allow_community_actions=true` and an
+`allowed_platform_actions` community action allow-list. Without all of
+these, the default is work/promise only. `social-sync --if-idle-due`
+uses the same SQLite DB to reserve a read-only discovery window no more
+than once per 30 minutes when no other runnable activity or due work
+exists. `host-wakeup-prepare --include-social` uses the existing
+Hook/Host Wakeup lease; no second periodic service is installed.
+
 ## Phase 5 event-only Light Tick
 
 `Tick.run(light=True)` uses the server-provided authenticated `/agent/events` feed exclusively for all remote discovery. No chats, Inbox, tasks/projects, old event-waterline probes, WS, or remote writes are executed as part of its normal event collection. The feed persists authorized message snapshots and non-message platform pointers as local inspect work; the same work/attention/score/wakeup components remain. Cursor pagination, backoff and incomplete-source reporting are independent of the Full Tick `events` checkpoint. Full Tick keeps its older resource sync/resync capabilities for completeness and compatibility.
