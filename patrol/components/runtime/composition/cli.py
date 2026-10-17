@@ -20,6 +20,7 @@ from ...persistence.index import Database, Busy
 from ...promises.index import Promises
 from ...queue.index import Queue, export_pending, MessageScores
 from ...scheduling.index import Scheduler
+from ...social.index import SocialOpportunities
 from ...transport.index import Client, credential_provider
 from ...wakeup.index import Wakeups
 from ..process.lock import instance_lock
@@ -58,6 +59,11 @@ def parser():
     sub.add_parser("doctor")
     sub.add_parser("status")
     sub.add_parser("platform-catalog")
+    a=sub.add_parser("social-sync")
+    a.add_argument("--limit",type=int,default=10)
+    a.add_argument("--max-new",type=int,default=3)
+    a=sub.add_parser("social-detail")
+    a.add_argument("id")
     a=sub.add_parser("platform-events")
     a.add_argument("--after",default="0")
     a.add_argument("--limit",type=int,default=50)
@@ -254,6 +260,20 @@ def main(argv=None):
                 result=migrate_legacy(db,args.directory,now,args.confirm_stopped)
             elif args.command=="backup":
                 result={"backup":db.backup(args.destination),"integrity":"ok"}
+            elif args.command=="social-sync":
+                if not 1<=args.limit<=20 or not 1<=args.max_new<=3:
+                    raise ValueError("social-sync limit must be 1..20 and max-new 1..3")
+                # Opt-in read-only discovery; this is never called by Light Tick.
+                client=Client(cfg,credential_provider(cfg))
+                remote=client.request("GET","/api/v1/agent/social/opportunities?limit="+str(args.limit))
+                if remote.status==200:
+                    result=SocialOpportunities(db).admit(remote.body,now,args.max_new)
+                else:
+                    result={"status":"deferred","remote_status":remote.status,
+                            "model_invoked":False,"host_woken":False,
+                            "remote_action_issued":False}
+            elif args.command=="social-detail":
+                result=SocialOpportunities(db).details(args.id)
             elif args.command=="platform-catalog":
                 client=Client(cfg,credential_provider(cfg))
                 remote=client.request("GET","/api/v1/agent/actions")

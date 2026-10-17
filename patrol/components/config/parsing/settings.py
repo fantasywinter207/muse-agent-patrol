@@ -32,6 +32,7 @@ class Config:
     wakeup_min_score: int = 70
     lease_seconds: int = 120
     allow_writes: bool = False
+    allow_community_actions: bool = False
     actor_id: str = ""
     allowed_chat_ids: list = field(default_factory=list)
     project_ids: list = field(default_factory=list)
@@ -52,7 +53,8 @@ class Config:
             raise ValueError("wakeup score must be an integer 0..100")
         if self.light_tick_budget_seconds<2:
             raise ValueError("light budget must allow a bounded HTTP request")
-        if type(self.allow_writes) is not bool or type(self.ack_single_enabled) is not bool:
+        if (type(self.allow_writes) is not bool or type(self.allow_community_actions) is not bool or
+                type(self.ack_single_enabled) is not bool):
             raise ValueError("write flags must be booleans")
         # A message seen on the next idle tick must still be eligible to open attention.
         if self.max_event_age_seconds < self.normal_scan_seconds + 60:

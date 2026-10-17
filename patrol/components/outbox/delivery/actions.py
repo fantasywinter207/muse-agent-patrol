@@ -37,7 +37,7 @@ class Outbox:
                     or payload["version"]!="1"
                     or not isinstance(payload["resource"],dict)
                     or set(payload["resource"])!={"type","id"}
-                    or payload["resource"]["type"] not in ("project","task","room","submission")
+                    or payload["resource"]["type"] not in ("project","task","room","submission","community","circle","post")
                     or not isinstance(payload["resource"]["id"],str)
                     or not 1<=len(payload["resource"]["id"])<=120
                     or payload["resource"]["id"]!=target
@@ -123,13 +123,33 @@ class Outbox:
                         or not isinstance(schedule_context["owner"],str)
                         or type(schedule_context["generation"]) is not int):
                     raise ValueError("invalid schedule fencing context")
-                live=c.execute("""SELECT id FROM schedule_activities
+                live=c.execute("""SELECT id,kind FROM schedule_activities
                     WHERE id=? AND status='running' AND lease_owner=?
                     AND lease_version=? AND lease_until>? AND preempt_requested=0""",
                     (schedule_context["id"],schedule_context["owner"],
                      schedule_context["generation"],now)).fetchone()
                 if live is None:
                     raise StaleLease("scheduler generation is suspended, preempt requested, stale or expired")
+                if live["kind"]=="social":
+                    intent=c.execute("""SELECT resource_type,resource_id,action
+                        FROM social_intents WHERE activity_id=?""",
+                        (schedule_context["id"],)).fetchone()
+                    # Phase 6.1 also supports manually registered, general
+                    # social activities. Preserve their existing Outbox
+                    # semantics; tighten only opportunities issued by the
+                    # new bounded discovery component and admission ledger.
+                    if intent is not None:
+                        if (action!="platform_action" or
+                                payload["action"]!=intent["action"] or
+                                payload["resource"]!={"type":intent["resource_type"],
+                                                      "id":intent["resource_id"]}):
+                            raise StaleLease("social opportunity may stage only its registered action and resource")
+                        # Exactly one distinct remote effect per discovered
+                        # opportunity, even if the model retries its plan.
+                        if c.execute("""SELECT 1 FROM scheduled_outbox
+                             WHERE schedule_id=? LIMIT 1""",
+                             (schedule_context["id"],)).fetchone():
+                            raise StaleLease("social opportunity already staged its one permitted action")
             c.execute("""INSERT INTO outbox(id,actor,action,target,logical_key,idem_key,payload,payload_hash,status,created_at,next_attempt_at)
                 VALUES(?,?,?,?,?,?,?,?,'prepared',?,?)""",(ident,actor,action,target,logical,new_id(),encoded,sha,now,now))
             if producer_id is not None:

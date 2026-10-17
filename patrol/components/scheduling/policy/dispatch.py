@@ -291,6 +291,19 @@ class Scheduler:
                                (row["work_id"],)).fetchone()
                 if not work or work["status"]!="done":
                     raise ValueError("linked local work must be completed with separate work-finish evidence")
+            if row["kind"]=="social" and c.execute(
+                    "SELECT 1 FROM social_intents WHERE activity_id=?",
+                    (ident,)).fetchone():
+                effects=c.execute("""SELECT o.status FROM outbox o
+                    JOIN scheduled_outbox so ON so.outbox_id=o.id
+                    WHERE so.schedule_id=?""",(ident,)).fetchall()
+                if effects:
+                    if any(effect["status"]!="confirmed" for effect in effects):
+                        raise ValueError("social remote action requires confirmed Outbox receipt")
+                elif (evidence.get("decision")!="skipped" or
+                      not isinstance(evidence.get("reason"),str) or
+                      not 1<=len(evidence["reason"].strip())<=500):
+                    raise ValueError("unposted social opportunity must be explicitly skipped with a reason")
             self._charge(c,row,now)
             c.execute("""UPDATE schedule_activities SET
                 status='completed',checkpoint=?,lease_owner=NULL,

@@ -43,8 +43,20 @@ def can_execute(sender,row):
     if resolved.status!=200 or not isinstance(resolved.body,dict):
         return False,"resource currently inaccessible"
     if (resolved.body.get("type")!=resource["type"] or
-            resolved.body.get("id")!=resource["id"] or
-            resolved.body.get("projectId") not in sender.config.allowed_project_action_ids):
+            resolved.body.get("id")!=resource["id"]):
+        return False,"resource scope identity mismatch"
+    if resource["type"] in ("community","circle","post"):
+        # Separate opt-in required, beyond the per-action default deny list.
+        # A public social directory entry alone is not a project permission.
+        if not sender.config.allow_community_actions:
+            return False,"community actions not enabled"
+        if resource["type"]=="community" and resource["id"]!="community":
+            return False,"unknown virtual community resource"
+        if (resource["type"]=="circle" and
+                command["action"]=="community.circle.message" and
+                resolved.body.get("joined") is not True):
+            return False,"circle message requires current membership"
+    elif resolved.body.get("projectId") not in sender.config.allowed_project_action_ids:
         return False,"resource outside explicit project write scope"
     return True,None
 

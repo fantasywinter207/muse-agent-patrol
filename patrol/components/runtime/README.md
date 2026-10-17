@@ -1,6 +1,12 @@
 # CLI与有界tick组合
 
 ## Purpose
+
+`social-sync` is an explicit, bounded **read-only HTTP GET + local
+Scheduler admission** command, separate from event-only Light Tick.
+`social-detail` reads an already admitted activity's exact resource and
+suggested Action Protocol name. No host/model invocation or remote write.
+
 CLI与有界tick组合。
 
 ## Responsibilities
