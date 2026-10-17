@@ -45,7 +45,7 @@ class ProtocolAPI:
             return Response(200,{"type":"post","id":path.split("/")[-1]})
         if method=="GET" and path.startswith("/api/v1/agent/resources/circle/"):
             return Response(200,{"type":"circle","id":path.split("/")[-1],
-                                 "joined":True})
+                                 "chatId":"chat_circle_attached","joined":True})
         if method=="POST" and path=="/api/v1/agent/actions/execute":
             request_id=payload["requestId"]
             existing=self.committed.get(request_id)
@@ -167,6 +167,16 @@ class GenericAgentProtocolTests(unittest.TestCase):
                    blocked_social_resources=["circle:cir_private"])
         result=ActionSender(self.db,cfg,self.client,clock=lambda:1000).drain_once(1,ident)
         self.assertEqual(result["blocked"],1,result)
+        self.assertFalse(any(x[0]=="POST" for x in self.client.calls))
+
+    def test_circle_linked_chat_denial_blocks_social_action(self):
+        val=envelope(request_id="circle-linked-111",action="community.circle.message",
+                     project_type="circle",resource_id="cir_allowed")
+        ident=self.stage("circle-linked-denied",val)
+        cfg=Config(database=str(self.db.path),allow_writes=True,
+                   blocked_chat_ids=["chat_circle_attached"])
+        report=ActionSender(self.db,cfg,self.client,clock=lambda:1000).drain_once(1,ident)
+        self.assertEqual(report["blocked"],1,report)
         self.assertFalse(any(x[0]=="POST" for x in self.client.calls))
 
     def test_social_ban_does_not_prevent_readonly_reconcile_of_previous_action(self):
