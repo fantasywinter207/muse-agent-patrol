@@ -420,5 +420,35 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         self.assertEqual(Wakeups(self.db).stage(1000,threshold=70),0)
 
 
+    def test_evidenced_blocked_work_handoff_reserves_scheduler_atomically(self):
+        work=Queue(self.db).enqueue("human:manual-unblock","human_action",
+                                    {"reason":"operator decision"},1000,priority=85)
+        self.scheduler.sync_work(1000)
+        with self.db.transaction() as cur:
+            cur.execute("UPDATE work_items SET status='blocked' WHERE id=?",(work,))
+        self.assertIsNone(self.scheduler.assess(1001)["candidate"])
+        claimed=Queue(self.db).claim_specific(work,"muse-a",1002,
+                                               {"approved_by":"operator"})
+        self.assertEqual(claimed["status"],"running")
+        active=self.scheduler.snapshot(1002)["decision"]["running"]
+        self.assertEqual(claimed["scheduler_activity_id"],active["id"])
+        self.assertEqual(claimed["scheduler_generation"],active["lease_version"])
+        context={"id":active["id"],"owner":"muse-a",
+                 "generation":active["lease_version"]}
+        sent=Outbox(self.db).stage("manual-safe","muse","send","chat",
+                                    {"content":"approved"},1003,
+                                    schedule_context=context)
+        self.assertTrue(sent)
+
+    def test_scheduler_fencing_survives_completion_of_last_activity(self):
+        activity=self.add("short-maintenance","maintenance")
+        running=self.scheduler.dispatch("worker",1000)["activity"]
+        self.scheduler.complete(activity,"worker",running["lease_version"],
+                                1001,{"result":"done"})
+        with self.assertRaises(StaleLease):
+            Outbox(self.db).stage("post-completion-bypass","muse",
+                                  "send","chat",{"content":"no fence"},1002)
+
+
 if __name__=="__main__":
     unittest.main()
