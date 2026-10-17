@@ -170,10 +170,10 @@ class SocialWakeTests(unittest.TestCase):
         def run(value):
             cfg.write_text(json.dumps(value),encoding="utf-8")
             buf=io.StringIO()
-            with patch("patrol.components.runtime.composition.cli.Client",FakeClient), \\
-                 patch("patrol.components.runtime.composition.cli.credential_provider",
-                       lambda settings: lambda:"stub"), \\
-                 contextlib.redirect_stdout(buf):
+            with (patch("patrol.components.runtime.composition.cli.Client",FakeClient),
+                  patch("patrol.components.runtime.composition.cli.credential_provider",
+                        lambda settings: lambda:"stub"),
+                  contextlib.redirect_stdout(buf)):
                 code=main(["--config",str(cfg),"--db",str(self.path),
                            "social-sync","--if-idle-due"])
             self.assertEqual(code,0,buf.getvalue())
