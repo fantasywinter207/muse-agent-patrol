@@ -119,9 +119,8 @@ class Outbox:
             # Existing immutable logical keys are returned above, preserving
             # readback after a yielded generation.
             if schedule_context is None and action not in ("ack","read"):
-                active=c.execute("""SELECT 1 FROM schedule_activities
-                    WHERE status IN ('ready','running','suspended') LIMIT 1""").fetchone()
-                if active:
+                adopted=c.execute("SELECT 1 FROM schedule_activities LIMIT 1").fetchone()
+                if adopted:
                     raise StaleLease("new business action requires a live scheduler generation")
             # A genuinely new remote action must be fenced in the SAME
             # transaction as insertion. Existing immutable actions are looked
