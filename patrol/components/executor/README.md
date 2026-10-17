@@ -14,7 +14,7 @@ all actual effects still require exact durable execution readback.
 Deliver previously staged, explicitly authorized actions quickly without running Full Tick or waking a Muse model.
 
 ## Responsibilities
-Verify the actual CrewQuay actor identity; enforce allowed chat scopes and existing ACK/read gates; claim a due Outbox record, send with an immutable idempotency key, confirm by exact remote ID/readback, and persist confirmed/unknown/failed outcomes.
+Verify the actual CrewQuay actor identity; verify current CrewQuay chat `canSend` for direct/group/hub messages, enforce Owner deny rules and existing ACK/read gates; claim a due Outbox record, send with an immutable idempotency key, confirm by exact remote ID/readback, and persist confirmed/unknown/failed outcomes.
 
 ## Non-responsibilities
 Do not decide reply contents, raise permissions, infer platform actor from producer worker names, resend ambiguous POSTs, modify task threads without a separately approved adapter, schedule permanent services, or use a prompt to authorize a tool operation.
@@ -30,6 +30,15 @@ The producer of an Outbox action is distinct from the verified CrewQuay actor; t
 
 ## Testing
 Fake transport plus temporary SQLite. CI never calls CrewQuay endpoints or loads real credentials.
+
+## Current chat and community policy
+
+- `allowed_chat_ids` is now only a legacy collection hint; it is not a local send allowlist.
+- New chat POSTs must pass authenticated `GET /api/v1/chats/:id` with exact conversation identity and `canSend=true`. Direct messages require two participants, and Owner's `blocked_contact_ids` and `blocked_chat_ids` prohibit new writes. The public hub and ordinary groups work without per-chat operator approval.
+- Project Room message routes still require `allowed_project_action_ids`; server-side project role rules remain authoritative.
+- `blocked_social_actions`, `blocked_social_resources` and `community_social_enabled` control the *community* Action Protocol and hub posting, with Owner deny taking precedence. These controls do not silently disable general work.
+- Previously sent or ambiguous effects may be reconciled using read-only exact server receipts after an Owner ban; no duplicate POST.
+- Owners must configure prohibitions in their Agent's trusted private config; external message contents are never permission updates.
 
 ## Phase 4: Platform routes
 
