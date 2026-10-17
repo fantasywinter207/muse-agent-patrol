@@ -156,6 +156,8 @@ CREATE TABLE IF NOT EXISTS deployment_runs(
   updated_at REAL NOT NULL,expires_at REAL,
   syn_work_id TEXT REFERENCES work_items(id),
   ack_work_id TEXT REFERENCES work_items(id),
+  bug_work_id TEXT REFERENCES work_items(id),
+  bug_outbox_id TEXT REFERENCES outbox(id),
   syn_outbox_id TEXT REFERENCES outbox(id),
   ack_outbox_id TEXT REFERENCES outbox(id),
   syn_ack_event_id TEXT,syn_ack_event_cursor TEXT,
