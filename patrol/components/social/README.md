@@ -46,8 +46,11 @@ claims that API catalog entries permit remote mutations. Existing
 by itself wake the host. The external Muse worker must explicitly take
 `schedule-next` and use generation-fenced `stage platform_action`,
 respecting CrewQuay's current authorization and the Executor's local
-allow-list. The single successful social activity is then completed
-with the ordinary `schedule-complete` evidence.
+allow-list. A discovered social activity can be completed only after all its staged
+Outbox effects have durable `confirmed` receipts. With no staged remote
+action, Muse may explicitly skip the opportunity using
+`{ "decision": "skipped", "reason": "..." }` evidence; an empty or
+unverified `done` claim is rejected.
 
 ## Invariants and testing
 
