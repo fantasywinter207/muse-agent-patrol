@@ -122,6 +122,52 @@ class EventOnlyLightTests(unittest.TestCase):
             with self.db.transaction() as c:
                 c.execute("UPDATE sync_cursors SET failures=0,next_at=0 WHERE source='agent_events'")
 
+    def test_failed_first_feed_call_initializes_stream_after_backoff(self):
+        first,_=self.tick([Response(503,{"error":"temporarily unavailable"})],
+                          now=1000)
+        self.assertIn("agent_events:failed",first["incomplete_sources"])
+        before=self.db.read("SELECT stream,received,failures FROM sync_cursors "
+                            "WHERE source='agent_events'")[0]
+        self.assertEqual((before["stream"],before["received"]),("","0"))
+        self.assertGreater(before["failures"],0)
+        recovered,_=self.tick([Response(200,page([event()]))],now=1100)
+        self.assertEqual(recovered["status"],"ok",recovered)
+        after=self.db.read("SELECT stream,received,failures FROM sync_cursors "
+                           "WHERE source='agent_events'")[0]
+        self.assertEqual((after["stream"],after["received"],after["failures"]),
+                         ("stream1","1",0))
+        self.assertEqual(len(self.db.read("SELECT event_id FROM message_receipts")),1)
+
+    def test_conflicting_event_replay_keeps_first_message_snapshot(self):
+        e=event()
+        self.tick([Response(200,page([e]))])
+        changed=event(message_id="forged-replay")
+        changed["message"]["content"]="modified duplicate payload"
+        self.tick([Response(200,page([changed],after="1",to="1"))],now=1100)
+        messages=self.db.read("SELECT external_key,payload FROM events "
+                              "WHERE source='messages'")
+        self.assertEqual(len(messages),1)
+        self.assertEqual(messages[0]["external_key"],"msg1")
+        self.assertNotIn("modified duplicate payload",messages[0]["payload"])
+
+    def test_light_tick_does_not_execute_legacy_remote_inspectors(self):
+        # An old Full Tick pointer must not revive remote resource polling.
+        from patrol.components.queue.index import Queue
+        with self.db.transaction() as c:
+            c.execute("""INSERT INTO events(source,scope,stream,external_key,
+                         payload,observed_at) VALUES
+                         ('events','global','old','legacy-event',
+                         '{"type":"task.updated","resourceId":"tsk_legacy"}',1000)""")
+            event_id=c.execute("SELECT last_insert_rowid()").fetchone()[0]
+        work_id=Queue(self.db).enqueue("inspect:legacy","inspect_event",
+                                      {"event_id":event_id},1000,event_id=event_id)
+        result,calls=self.tick([Response(200,page([],to="0"))],now=1000)
+        self.assertEqual(result["status"],"ok",result)
+        self.assertTrue(all("/agent/events?" in p or p=="/api/v1/agents/me"
+                            for _,p in calls))
+        self.assertEqual(self.db.read("SELECT status FROM work_items WHERE id=?",
+                                      (work_id,))[0]["status"],"pending")
+
     def test_expired_server_history_never_skip_to_live(self):
         result,_=self.tick([Response(410,{"error":"RESYNC_REQUIRED"})])
         self.assertIn("agent_events:resync_required",result["incomplete_sources"])

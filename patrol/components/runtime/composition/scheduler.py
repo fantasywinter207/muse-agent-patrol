@@ -206,7 +206,8 @@ class Tick(ActionSender):
                 if event_result!="complete":
                     report["incomplete_sources"].append("agent_events:"+event_result)
                 report["errors"].extend(self.collector.errors)
-            report["completed_work"]+=self.execute(self.config.max_work_per_tick)
+            report["completed_work"]+=self.execute(
+                self.config.max_work_per_tick,local_only=True)
         except (BudgetExceeded,AuthError) as e:
             report["status"]="deferred" if isinstance(e,BudgetExceeded) else "authorization_failed"
             report["errors"].append({"code":type(e).__name__})

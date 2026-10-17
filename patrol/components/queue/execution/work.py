@@ -40,7 +40,8 @@ class Queue:
                 AND COALESCE(ms.muse_score,ms.base_score)>=70)
         """ if lane=="background" else (
             """ AND type='inspect_event' AND EXISTS (
-                SELECT 1 FROM events e WHERE e.id=work_items.event_id AND e.source='messages')
+                SELECT 1 FROM events e WHERE e.id=work_items.event_id
+                 AND e.source IN ('messages','agent_events'))
             """ if lane=="local_messages" else "")
         with self.db.transaction() as c:
             row = c.execute("""SELECT * FROM work_items WHERE status IN ('pending','retry_wait')

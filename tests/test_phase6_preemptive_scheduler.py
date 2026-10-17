@@ -72,6 +72,12 @@ class PreemptiveSchedulerTests(unittest.TestCase):
                                    {"sent_intent":ident},voluntary=True)
         row=self.db.read("SELECT status FROM outbox WHERE id=?",(ident,))[0]
         self.assertEqual(row["status"],"prepared")
+        # An immutable, already-staged action may be retrieved even after its
+        # original scheduler generation has been fenced by a safe-point yield.
+        duplicate=Outbox(self.db).stage("a-first","muse","send","chat",
+                                       {"content":"authorized payload"},1003,
+                                       schedule_context=guard)
+        self.assertEqual(duplicate,ident)
         audit=self.db.read("SELECT * FROM scheduled_outbox WHERE outbox_id=?",(ident,))
         self.assertEqual(audit[0]["lease_generation"],claimed["lease_version"])
         with self.assertRaises(StaleLease):
@@ -115,7 +121,49 @@ class PreemptiveSchedulerTests(unittest.TestCase):
                                          {"state":"slice"})
         self.assertGreater(after["activity"]["virtual_runtime"],150)
         self.assertAlmostEqual(after["activity"]["cpu_seconds"],30)
-        self.assertTrue(20<=after["activity"]["slice_until"]-1030<=120)
+        self.assertEqual(after["activity"]["slice_until"],r["slice_until"])
+
+    def test_repeated_checkpoints_do_not_extend_a_competitive_slice(self):
+        first_id=self.add("session-a",score=52,weight=50)
+        second_id=self.add("session-b",score=52,weight=50)
+        active=self.scheduler.dispatch("worker-a",1000)["activity"]
+        original_end=active["slice_until"]
+        for at in (1010,1020,1030,1040):
+            saved=self.scheduler.checkpoint(active["id"],"worker-a",
+                         active["lease_version"],at,{"progress":at})
+            self.assertFalse(saved["suspended"])
+            self.assertEqual(saved["activity"]["slice_until"],original_end)
+        decision=self.scheduler.dispatch("worker-b",original_end)
+        self.assertEqual(decision["advice"],"checkpoint_at_safe_point")
+        yielded=self.scheduler.checkpoint(active["id"],"worker-a",
+                     active["lease_version"],original_end+0.01,
+                     {"progress":"yield"})
+        self.assertTrue(yielded["suspended"])
+        next_activity=self.scheduler.dispatch("worker-b",original_end+0.02)["activity"]
+        self.assertIn(next_activity["id"],(first_id,second_id))
+        self.assertNotEqual(next_activity["id"],active["id"])
+
+    def test_time_slice_fits_a_short_configured_lease(self):
+        short=Scheduler(self.db,lease_seconds=30)
+        self.add("short-lease",weight=100)
+        active=short.dispatch("worker",1000)["activity"]
+        self.assertLess(active["slice_until"],active["lease_until"])
+
+    def test_retry_wait_and_blocked_work_cannot_dispatch_early(self):
+        work=Queue(self.db).enqueue("human:delayed","human_action",
+                                    {"reason":"retry"},1000,priority=95)
+        with self.db.transaction() as c:
+            c.execute("UPDATE work_items SET status='retry_wait',next_action_at=2000 "
+                      "WHERE id=?",(work,))
+        self.scheduler.sync_work(1000)
+        self.assertIsNone(self.scheduler.assess(1001)["candidate"])
+        self.assertFalse(self.scheduler.dispatch("worker",1001)["granted"])
+        with self.db.transaction() as c:
+            c.execute("UPDATE work_items SET status='blocked' WHERE id=?",(work,))
+        self.assertIsNone(self.scheduler.assess(2100)["candidate"])
+        with self.db.transaction() as c:
+            c.execute("UPDATE work_items SET status='retry_wait' WHERE id=?",(work,))
+        self.assertTrue(self.scheduler.dispatch("worker",2100)["granted"])
 
     def test_aging_can_raise_old_low_priority_activity(self):
         older=self.add("old",now=0,score=47)
@@ -247,7 +295,9 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         self.assertFalse(report["scheduler"]["model_invoked"])
         self.assertFalse(report["scheduler"]["remote_action_issued"])
         self.assertEqual(self.db.read("SELECT count(*) AS n FROM schedule_activities")[0]["n"],1)
-        self.assertEqual(self.db.read("SELECT status FROM work_items WHERE logical_key='human:auto'")[0]["status"],"blocked")
+        # Light Tick leaves human decisions pending for the host; it never
+        # takes and blocks a work lease merely because it lacks a model.
+        self.assertEqual(self.db.read("SELECT status FROM work_items WHERE logical_key='human:auto'")[0]["status"],"pending")
 
 
 if __name__=="__main__":
