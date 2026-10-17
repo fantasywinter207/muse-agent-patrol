@@ -1,16 +1,29 @@
-# 60 秒 HATCH Hook：现有宿主核验与去重部署
+# 60 秒 HATCH Hook：首次安装、复用与宿主验收
 
 ## 结论先行
 
 **HATCH 的原有 60 秒 Hook 是唯一核心入口，已在 Phase 3 生产测试中证明 Owner 私聊 3/3 可完成 `confirmed`。** v3 SQLite / Phase 5 / Phase 6.1 是该入口后面的可更新组件，**不是**另一个定时器。
 
-仓库不掌握现有宿主的任务定义，也不自动安装/修改/删除任务。此文是运维核验清单，不是要求创建名为 `crewquay-patrol-v3` 的任务，更不是要求把重复任务改为 60 秒。
+仓库不掌握现有宿主的任务定义，也不自动安装/修改/删除任务。**有现成原生 HATCH Hook 时必须复用；全新宿主没有 Hook 且 Agent 具有合法的宿主注册权限时，应主动安装它的第一条、唯一一条 60 秒原生 HATCH Hook。** 禁止的是第二条独立定时器、`crewquay-patrol-v3` 或改用普通 cron；不是禁止新机器首次安装。
 
-## 先只读检查，后变更
+## 首次部署（宿主没有 Hook 时）
+
+不要停在“`~/.hatch/` 是空的、手动 Tick 成功，所以只能等人安装”。有原生宿主安装权限的 Agent 应当完成下面的整个步骤：
+
+1. 用当前获准的 HATCH **原生管理接口**实际查询注册的 Hook、是否启用、运行时 ABI 和最近触发记录。目录空、查不到常驻进程不等于确认没有计划任务；以宿主登记和执行日志为准。
+2. 核对 Python 3.10+、Bash、`flock`、`timeout`，私有 CrewQuay 配置与当前 Agent 的 SQLite；运行 `bash -n tools/crewquay_phase3_hook.sh` 和 `python3 -m patrol --help` 是**预检**，不是安装。
+3. 确认无现成入口后，**若有宿主注册授权，使用宿主支持的原生 HATCH 注册方法安装 60 秒 Hook 并启用**。传入现有仓库中的有界 Hook 执行体；不得擅自编造“通用 HATCH CLI”，也不得因为不知道 HATCH 命令就创建独立 cron、systemd timer 或第二个 `crewquay-patrol-v3`。原生安装方法依具体宿主而定，本仓库不提供可跨宿主直接执行的安装命令。
+4. 真实宿主负责设置 `HATCH_HOOK_RUNTIME`，并提供 `log()`、`silent()`、`wake()`。运行时需注入该 Agent 自己的 `CREWQUAY_REPO`、`CREWQUAY_CONFIG`、`CREWQUAY_DB`。绝对不能复制其他账号的凭据、SQLite 或运行时 token。初次使用 `CREWQUAY_HOST_WAKEUP_WIRED=0`，先验证 Light Tick + Outbox 补偿 + 空闲社交限流。
+5. 等待宿主**自然**触发 3–5 次，核对 HATCH 任务真实计划间隔、日志开始时间、`patrol_runs` 新记录、游标变化、错误和锁冲突。仅手动跑 `tick` 生成数据库记录不满足自动运行。
+6. 真正的 `wake()` 及可核验接收回执/ `wakeup-ack` 已接线后，才可开启 `CREWQUAY_HOST_WAKEUP_WIRED=1`，并在合法测试消息上做端到端闭环验证。没有宿主回执则记录 `poll_only`/唤醒未验收，不能假造 accepted。
+
+**验收分开报：** `HOOK_REGISTERED`（确已注册启用）→ `HOOK_TICK_PASS`（自然 60 秒触发）→ `WAKE_BRIDGE_PASS`（真实 wake/ack）→ `MUSE_ACTION_PASS`（Muse 真正执行且需要写入时平台确认）。任何缺口必须明确具体阻塞，不能报告“已自动接入”。如果本 Agent 无宿主原生安装能力/权限，报告 `BLOCKED_HOST_HOOK` 与需要宿主操作者提供的最小能力，再继续其他已授权工作；不替代为一条新的外部 cron。
+
+## 已有 Hook：先只读检查，后变更
 
 由拥有 HATCH 实际管理权限的操作者完成，敏感信息脱敏保存：
 
-1. 列出现有 HATCH Hook / timers / cron 的名称、运行命令、实际执行间隔与最近 5 次开始时间。**先定位已经稳定运行的原 60 秒 Hook**，不要凭任务名称推测真实触发链路。
+1. 列出现有 HATCH Hook / timers / cron 的名称、运行命令、实际执行间隔与最近 5 次开始时间。**已有 Hook 时先定位它、复用它**，不要凭任务名称推测真实触发链路。
 2. 记录其调用的仓库路径及 SHA、`CQ_CONFIG` / `CQ_DB` 实际路径、SQLite `status`、`agent_events` 游标、最近的 `patrol_runs`。确保同一 Agent 同一个身份与状态库。
 3. 查明 `crewquay-patrol-v3`（若存在）实际是否另外执行 `tick`、`outbox-drain` 或 Muse wake；与原 Hook 是否冲突。**确认是重复定时入口后才停用多余任务**，保持旧状态/定义供回滚核查，避免误删正在使用的唯一入口。
 4. 检查 Hook 是否包含有界的 `tick --light`、`outbox-drain --once --lane any --limit 3`、`social-sync --if-idle-due`。如果缺步骤，**在原 Hook 上更新执行体**；不另建一个 Cron 来运行这些步骤。
