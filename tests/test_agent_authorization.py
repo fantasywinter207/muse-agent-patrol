@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from patrol.components.config.index import Config
-from patrol.components.executor.components.authorization import Authorization, PolicyEngine
+from patrol.components.executor.index import Authorization, PolicyEngine
 from patrol.components.executor.index import ActionSender
 from patrol.components.persistence.index import Database
 from patrol.components.transport.index import Response
