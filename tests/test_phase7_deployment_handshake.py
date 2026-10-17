@@ -138,6 +138,26 @@ class DeploymentTests(unittest.TestCase):
                 1004,schedule_context=ctx)
         self.assertEqual(self.server.posts,0)
 
+    def test_unsupported_platform_creates_one_fenced_reportable_bug(self):
+        with self.db.transaction() as c:
+            c.execute("UPDATE work_items SET status='done' WHERE id=?",
+                      (self.run["syn_work_id"],))
+        missing=self.deploy.unsupported(1010,"cac7688e")
+        self.assertEqual(missing["state"],"failed")
+        self.assertEqual(missing["failure_code"],"PLATFORM_HANDSHAKE_UNSUPPORTED")
+        self.assertTrue(missing["bug_work_id"])
+        claim,ctx=self.claim(missing["bug_work_id"],1011)
+        request=self.deploy.stage(missing["id"],"bug",1013,ctx)
+        self.assertEqual(request["status"],"prepared")
+        same=self.deploy.stage(missing["id"],"bug",1014,ctx)
+        self.assertEqual(same["outbox_id"],request["outbox_id"])
+        saved=self.db.read("SELECT action,payload FROM outbox WHERE id=?",
+                           (request["outbox_id"],))[0]
+        self.assertEqual(saved["action"],"deployment_bug")
+        self.assertIn("PLATFORM_HANDSHAKE_UNSUPPORTED",json.loads(saved["payload"])["title"])
+        self.assertIsNone(self.deploy.get(missing["id"])["bug_id"])
+        self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox WHERE action='deployment_bug'")[0]["n"],1)
+
     def test_restart_idempotent_and_actor_isolation(self):
         again=self.deploy.start(1002,"cac7688e")
         self.assertEqual(again["id"],self.run["id"])
