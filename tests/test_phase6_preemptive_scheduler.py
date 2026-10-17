@@ -27,6 +27,139 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         return self.scheduler.register(key,kind,now,priority_score=score,
                                        weight=weight,deadline=deadline)
 
+    def test_issue31_schedule_next_imports_fresh_owner_work_before_selection(self):
+        low=Queue(self.db).enqueue("work:old-lower","human_action",
+                                   {"reason":"background review"},1000,priority=45)
+        self.scheduler.sync_work(1000)
+        owner_work=Queue(self.db).enqueue("work:owner-dm","human_action",
+                                          {"reason":"Owner requests reply"},1001,
+                                          priority=85)
+        # No tick reconcile or explicit schedule-sync after this new DM.
+        # schedule-next itself must make the Owner's work runnable.
+        result=self.scheduler.dispatch("muse-worker",1002)
+        self.assertTrue(result["granted"],result)
+        self.assertEqual(result["activity"]["work_id"],owner_work)
+        self.assertGreaterEqual(result["activities_registered"],1)
+        self.assertNotEqual(result["activity"]["work_id"],low)
+        claim=Queue(self.db).claim_specific(owner_work,"muse-worker",1003,
+                                             {"approved_by":"Owner"})
+        self.assertEqual(claim["scheduler_activity_id"],result["activity"]["id"])
+        ident=Outbox(self.db).stage("owner-ack","muse","send","owner-chat",
+                                   {"content":"收到，1"},1004,
+                                   schedule_context={
+                                       "id":result["activity"]["id"],
+                                       "owner":"muse-worker",
+                                       "generation":result["activity"]["lease_version"]})
+        self.assertTrue(ident)
+        self.assertEqual(self.db.read(
+            "SELECT status FROM outbox WHERE id=?",(ident,))[0]["status"],"prepared")
+
+    def test_issue31_owner_recovery_after_live_lower_priority_slice_yields(self):
+        lower=Queue(self.db).enqueue("work:low-running","human_action",
+                                      {"reason":"lower priority"},1000,priority=45)
+        first=self.scheduler.dispatch("worker-low",1001)["activity"]
+        self.assertEqual(first["work_id"],lower)
+        claim_low=Queue(self.db).claim_specific(lower,"worker-low",1002,
+                                              {"approved_by":"Owner"})
+        owner=Queue(self.db).enqueue("work:urgent-owner","human_action",
+                                     {"reason":"owner DM"},1003,priority=85)
+        blocked=self.scheduler.dispatch("worker-owner",1004,for_work_id=owner)
+        self.assertFalse(blocked["granted"])
+        self.assertEqual(blocked["requested_work_id"],owner)
+        self.assertEqual(blocked["hint_status"],"eligible")
+        self.assertEqual(blocked["advice"],"checkpoint_at_safe_point")
+        with self.assertRaises(StaleLease):
+            Queue(self.db).claim_specific(owner,"worker-owner",1004,
+                                         {"approved_by":"Owner"})
+        yielded=self.scheduler.checkpoint(first["id"],"worker-low",
+                                         first["lease_version"],1005,
+                                         {"safe_point":"handoff urgent DM"},voluntary=True)
+        self.assertTrue(yielded["suspended"])
+        self.assertEqual(self.db.read(
+            "SELECT status FROM work_items WHERE id=?",(lower,))[0]["status"],"pending")
+        resumed=self.scheduler.dispatch("worker-owner",1006,for_work_id=owner)
+        self.assertTrue(resumed["granted"],resumed)
+        self.assertEqual(resumed["activity"]["work_id"],owner)
+        Queue(self.db).claim_specific(owner,"worker-owner",1007,
+                                     {"approved_by":"Owner"})
+        guard={"id":resumed["activity"]["id"],"owner":"worker-owner",
+               "generation":resumed["activity"]["lease_version"]}
+        oid=Outbox(self.db).stage("unique-owner-reply","muse","send","owner-chat",
+                                  {"content":"收到，1"},1008,schedule_context=guard)
+        self.assertTrue(oid)
+        with self.assertRaises(StaleLease):
+            Outbox(self.db).stage("stale-old-worker","muse","send","owner-chat",
+                {"content":"duplicate"},1009,
+                schedule_context={"id":first["id"],"owner":"worker-low",
+                                  "generation":first["lease_version"]})
+        self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox")[0]["n"],1)
+
+    def test_issue31_expired_linked_leases_recover_then_owner_dispatches(self):
+        low=Queue(self.db).enqueue("work:stale-low","human_action",
+                                    {"reason":"old"},1000,priority=45)
+        first=self.scheduler.dispatch("worker-vanished",1000)["activity"]
+        claimed=Queue(self.db).claim_specific(low,"worker-vanished",1001,
+                                              {"approved_by":"Owner"})
+        urgent=Queue(self.db).enqueue("work:fresh-owner","human_action",
+                                       {"reason":"Owner DM"},1010,priority=85)
+        # Dispatch must fence the scheduler AND its linked Queue lease.
+        result=self.scheduler.dispatch("worker-new",1120,for_work_id=urgent)
+        self.assertTrue(result["granted"],result)
+        self.assertEqual(result["lease_recovered"],1)
+        self.assertEqual(result["activity"]["work_id"],urgent)
+        old_work=self.db.read("SELECT status,lease_version FROM work_items WHERE id=?",
+                              (low,))[0]
+        self.assertEqual(old_work["status"],"pending")
+        self.assertGreater(old_work["lease_version"],claimed["lease_version"])
+        with self.assertRaises(StaleLease):
+            Outbox(self.db).stage("crashed-worker-late","muse","send","owner-chat",
+                {"content":"late"},1121,
+                schedule_context={"id":first["id"],"owner":"worker-vanished",
+                                  "generation":first["lease_version"]})
+        Queue(self.db).claim_specific(urgent,"worker-new",1121,
+                                     {"approved_by":"Owner"})
+        oid=Outbox(self.db).stage("owner-after-recovery","muse","send","owner-chat",
+                                 {"content":"收到，1"},1122,
+                                 schedule_context={"id":result["activity"]["id"],
+                                     "owner":"worker-new",
+                                     "generation":result["activity"]["lease_version"]})
+        self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox")[0]["n"],1)
+        self.assertTrue(oid)
+
+    def test_issue31_operator_hint_does_not_override_ineligible_or_higher_work(self):
+        low=Queue(self.db).enqueue("work:hint-low","human_action",
+                                    {"reason":"lower priority"},1000,priority=45)
+        high=Queue(self.db).enqueue("work:hint-high","human_action",
+                                     {"reason":"more urgent"},1001,priority=85)
+        result=self.scheduler.dispatch("operator",1002,for_work_id=low)
+        self.assertFalse(result["granted"],result)
+        self.assertEqual(result["hint_status"],"outscored_by_other_activity")
+        self.assertEqual(result["candidate"]["work_id"],high)
+        self.assertIsNone(self.scheduler.assess(1002)["running"])
+        with self.db.transaction() as c:
+            c.execute("UPDATE work_items SET status='needs_approval' WHERE id=?",(high,))
+        rejected=self.scheduler.dispatch("operator",1003,for_work_id=high)
+        self.assertFalse(rejected["granted"],rejected)
+        self.assertEqual(rejected["hint_status"],"work_needs_approval")
+        self.assertIsNone(self.scheduler.assess(1003)["running"])
+        unknown=self.scheduler.dispatch("operator",1004,for_work_id="not-found")
+        self.assertEqual(unknown["hint_status"],"unknown_or_nonhuman_work")
+        self.assertFalse(unknown["granted"])
+        correct=self.scheduler.dispatch("operator",1005,for_work_id=low)
+        self.assertTrue(correct["granted"],correct)
+        self.assertEqual(correct["activity"]["work_id"],low)
+
+    def test_issue31_sync_does_not_duplicate_custom_work_activity(self):
+        work=Queue(self.db).enqueue("work:custom-key","human_action",
+                                     {"reason":"existing handoff"},1000,priority=85)
+        registered=self.scheduler.register("operator:existing","work",1000,
+                        priority_score=85,work_id=work)
+        result=self.scheduler.dispatch("muse",1001)
+        self.assertTrue(result["granted"])
+        self.assertEqual(result["activity"]["id"],registered)
+        self.assertEqual(self.db.read("SELECT count(*) AS n FROM schedule_activities "
+                                     "WHERE work_id=?",(work,))[0]["n"],1)
+
     def test_deadline_beats_high_social_score_without_fixed_priority_lanes(self):
         self.add("social","social",score=75)
         task=self.add("urgent","work",score=45,deadline=1015)
