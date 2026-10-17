@@ -296,7 +296,7 @@ class Collector:
         target=state["target"]
         stream=state["stream"]
         for _ in range(self.config.light_max_pages_per_source):
-            params={"after":after,"limit":50}
+            params={"after":after,"limit":self.config.agent_events_page_limit}
             if target:
                 params["to"]=target
             try:
