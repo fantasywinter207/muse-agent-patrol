@@ -173,6 +173,10 @@ def parser():
     a.add_argument("id")
     a.add_argument("--proven-absent",action="store_true")
     a.add_argument("--evidence",required=True)
+    a=sub.add_parser("wakeup-reconcile-accepted")
+    a.add_argument("id")
+    a.add_argument("--proven-not-started",action="store_true")
+    a.add_argument("--evidence",required=True)
     a=sub.add_parser("work-claim")
     a.add_argument("id")
     a.add_argument("--owner",required=True)
@@ -422,6 +426,9 @@ def main(argv=None):
             elif args.command=="wakeup-reconcile":
                 result=Wakeups(db,cfg.lease_seconds).reconcile_unknown(
                     args.id,now,args.proven_absent,evidence(args.evidence))
+            elif args.command=="wakeup-reconcile-accepted":
+                result=Wakeups(db,cfg.lease_seconds).reconcile_accepted_no_start(
+                    args.id,now,args.proven_not_started,evidence(args.evidence))
             elif args.command=="work-claim":
                 item=Queue(db,cfg.lease_seconds).claim_specific(
                     args.id,args.owner,now,evidence(args.authorization_evidence))
