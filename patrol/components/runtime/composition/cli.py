@@ -411,6 +411,10 @@ def main(argv=None):
                 result={"work_id":item["id"],"lease_owner":item["lease_owner"],
                         "lease_version":item["lease_version"],"lease_until":item["lease_until"],
                         "payload":item["payload"],"warning":"local claim is not CrewQuay role authorization"}
+                if "scheduler_activity_id" in item:
+                    result.update(schedule_id=item["scheduler_activity_id"],
+                                  schedule_owner=item["lease_owner"],
+                                  schedule_generation=item["scheduler_generation"])
             elif args.command=="work-renew":
                 renewed=Queue(db,cfg.lease_seconds).renew(
                     {"id":args.id,"lease_owner":args.owner,"lease_version":args.lease_version},
