@@ -60,6 +60,10 @@ def parser():
     sub.add_parser("doctor")
     sub.add_parser("status")
     sub.add_parser("platform-catalog")
+    sub.add_parser("platform-auth-sync")
+    a=sub.add_parser("platform-auth-bootstrap")
+    a.add_argument("--deployment-run-id",default="initial-deployment")
+
     a=sub.add_parser("deployment-ensure")
     a.add_argument("--repo-sha",required=True)
     a=sub.add_parser("deployment-start")
@@ -415,6 +419,26 @@ def main(argv=None):
                                 "host_woken":False,"remote_action_issued":False}
             elif args.command=="social-detail":
                 result=SocialOpportunities(db).details(args.id)
+            elif args.command in ("platform-auth-sync","platform-auth-bootstrap"):
+                from ...executor.components.authorization import Authorization
+                known=db.read("SELECT value FROM meta WHERE key='actor'")
+                if not known:
+                    raise ValueError("verified CrewQuay actor binding required for authorization")
+                actor=known[0]["value"]
+                client=Client(cfg,credential_provider(cfg))
+                authority=Authorization(db)
+                if args.command=="platform-auth-sync":
+                    manifest,status=authority.get(client,actor)
+                    reconciled=authority.sync_requests(client,actor) if manifest else False
+                    result={"status":"ok" if manifest else "deferred",
+                            "remote_status":status,
+                            "actor":actor,
+                            "revision":manifest.get("revision") if manifest else None,
+                            "requests_reconciled":reconciled}
+                elif not cfg.allow_writes:
+                    result={"status":"emergency_write_stop","remote_action_issued":False}
+                else:
+                    result=authority.bootstrap(client,actor,args.deployment_run_id)
             elif args.command=="platform-catalog":
                 client=Client(cfg,credential_provider(cfg))
                 remote=client.request("GET","/api/v1/agent/actions")
