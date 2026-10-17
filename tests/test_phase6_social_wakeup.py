@@ -181,6 +181,17 @@ class SocialWakeTests(unittest.TestCase):
                          "not_due_or_busy")
         self.assertEqual(len(FakeClient.calls),1)
 
+    def test_idle_discovery_requires_verified_local_agent_before_any_get(self):
+        with self.db.transaction() as c:
+            c.execute("DELETE FROM meta WHERE key='actor'")
+        self.assertFalse(self.social.reserve_idle_discovery(1000))
+        self.assertEqual(self.db.read(
+            "SELECT count(*) AS n FROM meta WHERE key='social_discovery_last_at'"
+        )[0]["n"],0)
+        with self.db.transaction() as c:
+            c.execute("INSERT INTO meta(key,value) VALUES('actor','muse')")
+        self.assertTrue(self.social.reserve_idle_discovery(1000))
+
     def test_hook_social_by_default_and_remains_a_single_schedule(self):
         hook=Path(__file__).resolve().parents[1]/"tools"/"crewquay_phase3_hook.sh"
         content=hook.read_text(encoding="utf-8")
