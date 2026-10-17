@@ -143,10 +143,10 @@ class SocialTests(unittest.TestCase):
         ok,_=can_execute(SimpleNamespace(db=self.db,config=cfg,client=fake),row)
         self.assertFalse(ok)
         cfg=Config(allow_writes=True)
-        ok,reason=can_execute(SimpleNamespace(config=cfg,client=fake),row)
+        ok,reason=can_execute(SimpleNamespace(db=self.db,config=cfg,client=fake),row)
         self.assertTrue(ok,reason)
         wrong={**row,"payload":{**row["payload"],"action":"task.claim"}}
-        ok,_=can_execute(SimpleNamespace(config=cfg,client=fake),wrong)
+        ok,_=can_execute(SimpleNamespace(db=self.db,config=cfg,client=fake),wrong)
         self.assertFalse(ok)
 
     def test_outbox_social_lease_accepts_exactly_one_registered_action(self):
