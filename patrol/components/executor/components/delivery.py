@@ -29,34 +29,54 @@ class ActionSender:
         self.actor=None
 
     def _chat_allowed(self, target):
-        """Owner denylist overrides all grants. Only verified DMs are open by default.
+        """Resolve current CrewQuay chat authority; Owner denials always win.
 
-        Group, project and community-hub chats still require an explicit
-        allowed_chat_ids entry. The platform remains the authority for current
-        membership and writable status; a chat_ prefix is never proof.
+        Chat IDs and local allowlists do not establish membership or permission.
+        Do not trust a chat_ prefix, a sender's requested target or stale
+        synced conversation metadata as proof of current server grants.
         """
         if target in self.config.blocked_chat_ids:
             return False,"chat explicitly blocked by Owner"
-        if target in self.config.allowed_chat_ids:
-            return True,None
         if self.client is None:
-            return False,"direct-chat permission lookup unavailable"
+            return False,"chat authorization lookup unavailable"
         try:
-            response=self.client.request(
-                "GET","/api/v1/chats/"+quote(target,safe=""))
+            response=self.client.request("GET","/api/v1/chats/"+quote(target,safe=""))
         except Exception:
-            return False,"direct-chat permission lookup unavailable"
+            return False,"chat authorization lookup unavailable"
         if response.status!=200 or not isinstance(response.body,dict):
-            return False,"chat not verified as writable direct conversation"
+            return False,"chat not currently authorized by platform"
         detail=response.body
-        if (detail.get("conversationId")==target
-                and detail.get("kind")=="direct"
-                and detail.get("canSend") is True
-                and detail.get("isObserver") is False
-                and type(detail.get("memberCount")) is int
-                and detail["memberCount"]==2):
-            return True,None
-        return False,"chat not verified as writable direct conversation"
+        kind=detail.get("kind")
+        if (detail.get("conversationId")!=target
+                or kind not in ("direct","group","community_hub","project")
+                or detail.get("canSend") is not True
+                or detail.get("isObserver") is True):
+            return False,"chat not currently writable by platform"
+        if kind=="community_hub":
+            if target!="community_hub":
+                return False,"hub conversation identity mismatch"
+            if not self.config.community_social_enabled:
+                return False,"community social activity disabled by Owner"
+        elif kind=="direct":
+            if type(detail.get("memberCount")) is not int or detail["memberCount"]!=2:
+                return False,"direct conversation must have two members"
+            # When the Owner blocks a peer, every present and future DM with
+            # that peer must be denied, including those not named in a chat ID
+            # denylist. Require bounded, well-formed member identity evidence.
+            if self.config.blocked_contact_ids:
+                members=detail.get("members")
+                if not isinstance(members,list) or len(members)!=2 or not all(
+                        isinstance(m,dict) and isinstance(m.get("id"),str)
+                        for m in members):
+                    return False,"direct participants unavailable for Owner policy"
+                if self.actor not in [m["id"] for m in members]:
+                    return False,"direct actor not a current participant"
+                if any(m["id"] in self.config.blocked_contact_ids for m in members):
+                    return False,"direct contact explicitly blocked by Owner"
+        elif kind=="project":
+            if detail.get("projectId") not in self.config.allowed_project_action_ids:
+                return False,"project chat outside approved formal project scope"
+        return True,None
 
     def can_send(self,row):
         if not self.config.allow_writes or not self.actor or self.actor!=row["actor"]:
@@ -134,10 +154,9 @@ class ActionSender:
         return self.client.request("POST",path,payload,row["idem_key"])
 
     def verify(self,row,response):
-        # A read-only unknown-result reconciliation must still respect the
-        # authorized chat scope, even though it never sends a POST.
-        if row["action"]=="send" and not self._chat_allowed(row["target"])[0]:
-            return None
+        # Reconciling a previously submitted effect is read-only. Owner
+        # prohibitions prevent NEW writes but must not erase evidence of a
+        # possible earlier write; the server still checks GET visibility.
         if row["action"] in ("project_message","task_thread_reply","room_message"):
             allowed,_=self.can_send(row)
             if not allowed:
