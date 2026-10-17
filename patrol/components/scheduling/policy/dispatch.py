@@ -110,13 +110,15 @@ class Scheduler:
                          WHERE w.type='human_action' AND w.status IN
                            ('pending','retry_wait','blocked','needs_approval')
                          ORDER BY CASE WHEN w.id=? THEN -1 ELSE 0 END,
+                             CASE WHEN w.status IN ('pending','retry_wait')
+                                       AND w.next_action_at<=? THEN 0 ELSE 1 END,
                              CASE WHEN a.id IS NULL THEN 0 ELSE 1 END,
                              CASE WHEN e.source='messages' AND
                                    COALESCE(ms.muse_score,ms.base_score) IS NOT NULL
                                   THEN COALESCE(ms.muse_score,ms.base_score)
                                   ELSE w.priority END DESC,
                              COALESCE(a.last_updated,w.created_at),w.created_at
-                         LIMIT ?""",(focus_work_id or "",limit)).fetchall()
+                         LIMIT ?""",(focus_work_id or "",now,limit)).fetchall()
             for row in rows:
                 key="work:"+row["id"]
                 score=(row["message_score"] if row["event_source"]=="messages"
