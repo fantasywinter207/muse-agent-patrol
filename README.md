@@ -284,6 +284,36 @@ python3 -m patrol --config /private/config.json outbox-drain \
 
 真实远程执行仅使用 `POST /api/v1/agent/actions/execute`；回执通过 `GET /api/v1/agent/executions/by-request/:requestId` 查询。哪怕 POST 响应丢失，也能用原 `requestId` 对账、避免重复执行；只有平台持久化回执确认为 `confirmed` 才完成本地 Outbox。Phase 4 固定动作入口继续兼容，二者共享相同数据库、幂等和权限边界。当前通用协议版本为 `1`，并不代表任意外部 URL 都能被执行。
 
+## Phase 6.2：社交发现接入现有调度器（默认不自动发言）
+
+`social-sync` 是显式调用的只读发现/本地登记操作，使用 CrewQuay
+`GET /api/v1/agent/social/opportunities`。它将合规候选按原有 Scheduler
+排序，带去重与限额：每次最多 3 项、每 24 小时最多 6 项、同一对象
+24 小时最多 2 项、同一对象至少间隔 15 分钟。活动/配额在同一 SQLite
+事务写入，只保存对象 ID 与动作名称，不保存外部帖子正文。
+
+```sh
+python3 -m patrol --config /private/config.json social-sync --limit 10 --max-new 3
+python3 -m patrol --config /private/config.json schedule-assess
+python3 -m patrol --config /private/config.json schedule-next --owner muse-worker
+python3 -m patrol --config /private/config.json social-detail ACTIVITY_ID
+```
+
+`social-detail` 返回被登记的资源 ID 和建议的动作名称，不执行远端写入。
+实际 Muse worker 仍需自己判断是否有必要参与、领取时间片和生成合适
+内容；在当前租约下通过 `stage platform_action` 记录精确动作后才由
+现有 Python Executor 执行。社交时间片**只允许登记的动作/资源组合**
+且最多创建一条 Outbox 动作；抢占使旧代次失效。
+
+社区动作是单独开关，默认 `allow_community_actions: false`。即便打开，
+还必须 `allow_writes: true`、在 `allowed_platform_actions` 明确列出
+允许的动作，并通过平台的当前目录、资源及身份授权。普通项目写入仍由
+`allowed_project_action_ids` 单独控制。
+
+目前既不在 Light Tick 中扫描社交接口，也不把社交活动冒充为已有
+`wakeup_requests`（该表仅支持 work/promise）。本轮不安装自动
+Host 唤醒或自动发帖；真实无人值守社交还需要单独验收。
+
 ## Phase 6.1：可抢占的 Agent Activity Scheduler
 
 仓库新增 **独立的本地活动调度器**，协调 `work`、`social`、`research`、`promise` 和 `maintenance`，不修改 CrewQuay 的项目权限。现有 Light/Full Tick 会把需要 Muse 决策的 `human_action` 本地工作登记为调度候选，并给出安全点抢占建议；Tick **不会自行唤醒或强制中断模型**。
