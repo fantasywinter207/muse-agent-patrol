@@ -219,7 +219,7 @@ class Tick(ActionSender):
                 if (pending and self.actor and
                         (not next_at or float(next_at[0]["value"])<=self.clock()) and
                         self.monotonic()<self.request_deadline-2):
-                    from ...executor.components.authorization import Authorization
+                    from ...executor.index import Authorization
                     authority=Authorization(self.db)
                     try:
                         snapshot,status=authority.get(self.client,self.actor)
