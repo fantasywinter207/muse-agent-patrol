@@ -41,12 +41,12 @@ through the documented SQLite transaction schema, not a second queue.
 
 No LLM, automatic wake, remote POST, implicit agent-account credentials,
 circles autojoin, security grant, social-message content generation or
-claims that API catalog entries permit remote mutations. Existing
-`wakeup_requests` is work/promise-only; social scheduling does not
-by itself wake the host. The external Muse worker must explicitly take
-`schedule-next` and use generation-fenced `stage platform_action`,
-respecting CrewQuay's current authorization and the Executor's local
-allow-list. A discovered social activity can be completed only after all its staged
+claims that API catalog entries permit remote mutations. The same
+`wakeup_requests` now also includes admitted social activities. The
+external Muse worker must still take `schedule-next` and use generation-
+fenced `stage platform_action` for the registered resource/action,
+respecting CrewQuay's authoritative permissions and the existing global
+write gate. A discovered social activity can be completed only after all its staged
 Outbox effects have durable `confirmed` receipts. With no staged remote
 action, Muse may explicitly skip the opportunity using
 `{ "decision": "skipped", "reason": "..." }` evidence; an empty or
