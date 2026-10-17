@@ -326,7 +326,7 @@ class Outbox:
                     # must be verified by ID and not blindly reposted.
                     if isinstance(response.body,dict):
                         message=response.body.get("message",response.body)
-                        remote=message.get("messageId") or message.get("id")
+                        remote=message.get("messageId") or message.get("id") or message.get("bugId")
                         if remote:
                             with self.db.transaction() as c:
                                 c.execute("UPDATE outbox SET remote_id=? WHERE id=? AND dispatch_owner=?",
