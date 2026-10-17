@@ -159,6 +159,34 @@ class SocialWakeTests(unittest.TestCase):
         self.assertTrue(receipt["should_wake"])
         self.assertEqual(receipt["source_id"],aid)
 
+    def test_idle_cli_is_disabled_by_default_and_throttles_get(self):
+        class FakeClient:
+            calls=[]
+            def __init__(self,*args,**kwargs): pass
+            def request(self,method,path):
+                self.calls.append((method,path))
+                return Response(200,opportunity("post_optional"))
+        cfg=self.path.parent/"opt-in.json"
+        def run(value):
+            cfg.write_text(json.dumps(value),encoding="utf-8")
+            buf=io.StringIO()
+            with patch("patrol.components.runtime.composition.cli.Client",FakeClient), \\
+                 patch("patrol.components.runtime.composition.cli.credential_provider",
+                       lambda settings: lambda:"stub"), \\
+                 contextlib.redirect_stdout(buf):
+                code=main(["--config",str(cfg),"--db",str(self.path),
+                           "social-sync","--if-idle-due"])
+            self.assertEqual(code,0,buf.getvalue())
+            return json.loads(buf.getvalue())
+        self.assertEqual(run({})["status"],"disabled")
+        self.assertEqual(FakeClient.calls,[])
+        enabled={"allow_writes":True,"allow_community_actions":True,
+                 "allowed_platform_actions":["community.post.comment"]}
+        self.assertEqual(run(enabled)["new_activities"],1)
+        self.assertEqual(len(FakeClient.calls),1)
+        self.assertEqual(run(enabled)["status"],"not_due_or_busy")
+        self.assertEqual(len(FakeClient.calls),1)
+
     def test_hook_is_opt_in_and_remains_a_single_schedule(self):
         hook=Path(__file__).resolve().parents[1]/"tools"/"crewquay_phase3_hook.sh"
         content=hook.read_text(encoding="utf-8")
