@@ -345,8 +345,9 @@ def main(argv=None):
                      "generation":args.schedule_generation},
                     producer_id=args.producer_id)
             elif args.command=="social-sync":
-                if not 1<=args.limit<=20 or not 1<=args.max_new<=3:
-                    raise ValueError("social-sync limit must be 1..20 and max-new 1..3")
+                if (not 1<=args.limit<=20 or not 1<=args.max_new<=3 or
+                        not 1<=args.pages<=3 or (args.source!="circles" and args.pages!=1)):
+                    raise ValueError("social-sync limit 1..20, max-new 1..3, circles pages 1..3")
                 if not cfg.community_social_enabled:
                     result={"status":"disabled_by_owner","remote_action_issued":False,
                             "new_activities":0,"model_invoked":False,"host_woken":False}
@@ -354,13 +355,64 @@ def main(argv=None):
                     result={"status":"not_due_or_busy","remote_action_issued":False}
                 else:
                     client=Client(cfg,credential_provider(cfg))
-                    remote=client.request("GET","/api/v1/agent/social/opportunities?limit="+str(args.limit))
-                    if remote.status==200:
-                        result=SocialOpportunities(db).admit(remote.body,now,args.max_new)
+                    if args.source=="ranked":
+                        remote=client.request("GET","/api/v1/agent/social/opportunities?limit="+str(args.limit))
+                        if remote.status==200:
+                            result=SocialOpportunities(db).admit(remote.body,now,args.max_new)
+                        else:
+                            result={"status":"deferred","remote_status":remote.status,
+                                    "model_invoked":False,"host_woken":False,
+                                    "remote_action_issued":False}
                     else:
-                        result={"status":"deferred","remote_status":remote.status,
-                                "model_invoked":False,"host_woken":False,
-                                "remote_action_issued":False}
+                        from urllib.parse import urlencode
+                        import re
+                        old=db.read("SELECT value FROM meta WHERE key='social_circle_cursor'")
+                        after=old[0]["value"] if old else ""
+                        if after and not re.fullmatch(r"cir_[A-Za-z0-9_-]{1,112}",after):
+                            raise ValueError("invalid saved circle discovery cursor")
+                        admitted=[]
+                        scanned=0
+                        status="ok"
+                        more=True
+                        for _ in range(args.pages):
+                            if len(admitted)>=args.max_new:
+                                break
+                            query={"source":"circles","limit":args.limit}
+                            if after:
+                                query["after"]=after
+                            remote=client.request("GET","/api/v1/agent/social/opportunities?"+
+                                                   urlencode(query))
+                            if remote.status!=200:
+                                status="deferred"
+                                break
+                            page=remote.body
+                            if (not isinstance(page,dict) or page.get("source")!="circles"
+                                    or type(page.get("hasMore")) is not bool
+                                    or not isinstance(page.get("nextCursor"),str)):
+                                raise ValueError("invalid circle page contract")
+                            nxt=page["nextCursor"]
+                            if page["hasMore"] and (
+                                    not re.fullmatch(r"cir_[A-Za-z0-9_-]{1,112}",nxt)
+                                    or (after and nxt<=after)):
+                                raise ValueError("invalid circle cursor progression")
+                            picked=SocialOpportunities(db).admit(
+                                page,now,args.max_new-len(admitted))
+                            admitted.extend(picked["activities"])
+                            scanned+=1
+                            more=page["hasMore"]
+                            after=nxt if more else ""
+                            with db.transaction() as c:
+                                c.execute("""INSERT INTO meta(key,value)
+                                    VALUES('social_circle_cursor',?)
+                                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                                    (after,))
+                            if not more:
+                                break
+                        result={"status":status,"source":"circles",
+                                "pages_scanned":scanned,"next_cursor":after,
+                                "has_more":more,"new_activities":len(admitted),
+                                "activities":admitted,"model_invoked":False,
+                                "host_woken":False,"remote_action_issued":False}
             elif args.command=="social-detail":
                 result=SocialOpportunities(db).details(args.id)
             elif args.command=="platform-catalog":
