@@ -77,7 +77,16 @@ class Queue:
             activity=c.execute("""SELECT status,lease_owner,lease_until,
                     preempt_requested FROM schedule_activities
                     WHERE work_id=?""",(ident,)).fetchone()
-            if activity and (
+            source=c.execute("SELECT status FROM work_items WHERE id=?",(ident,)).fetchone()
+            manual_unblock=bool(
+                activity and source and
+                source["status"] in ("blocked","needs_approval") and
+                activity["status"] in ("ready","suspended") and
+                not c.execute("SELECT 1 FROM schedule_activities WHERE status='running' LIMIT 1").fetchone()
+            )
+            # An explicitly evidenced operator handoff of blocked work
+            # precedes scheduling; it does not grant remote permissions.
+            if activity and not manual_unblock and (
                 activity["status"]!="running" or
                 activity["lease_owner"]!=owner or
                 activity["lease_until"] is None or activity["lease_until"]<=now or
