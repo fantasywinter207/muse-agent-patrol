@@ -39,6 +39,14 @@ class Phase3Tests(unittest.TestCase):
                 self.requests+=1
                 if method=="GET" and path=="/api/v1/agents/me":
                     return Response(200,{"id":actor})
+                if method=="GET" and path=="/api/v1/chats/owner":
+                    return Response(200,{"conversationId":"owner","kind":"direct",
+                        "canSend":True,"memberCount":2,"isObserver":False,
+                        "members":[{"id":"crewquay-agent"},{"id":"owner"}]})
+                if method=="GET" and path=="/api/v1/chats/not-authorized":
+                    return Response(403,{"error":"no membership"})
+                if method=="GET" and path=="/api/v1/chats/unapproved":
+                    return Response(403,{"error":"no membership"})
                 if method=="POST" and path=="/api/v1/chats/owner/messages":
                     return Response(201,{"messageId":message_id})
                 if method=="GET" and path.startswith("/api/v1/chats/owner/messages?"):
@@ -63,6 +71,8 @@ class Phase3Tests(unittest.TestCase):
                     return Response(200,{"items":[{"messageId":message_id,
                         "senderId":"crewquay-agent","content":"hello"}],
                         "nextCursor":"1","hasMore":False})
+                if method=="GET" and path=="/api/v1/chats/other-unknown":
+                    return Response(404,{"error":"not found"})
                 raise AssertionError("unexpected request "+method+" "+path)
         return Client(),calls
 
@@ -114,12 +124,42 @@ class Phase3Tests(unittest.TestCase):
         self.assertFalse(any(path=="/api/v1/chats/direct-one" for _,path in calls))
         self.assertFalse(any(method=="POST" for method,_ in calls))
 
-    def test_group_observer_or_unwritable_chat_cannot_bypass_group_allowlist(self):
+    def test_group_and_hub_are_writable_without_any_local_chat_allowlist(self):
+        for kind in ("group","community_hub"):
+            with self.subTest(kind=kind):
+                detail={"conversationId":"direct-one","kind":kind,
+                        "memberCount":3,"canSend":True,
+                        "isObserver":False}
+                # The hub uses its actual fixed conversation ID.
+                target="community_hub" if kind=="community_hub" else "direct-one"
+                client,calls=self.direct_client({**detail,"conversationId":target})
+                if kind=="community_hub":
+                    class HubClient:
+                        def request(self,method,path,payload=None,idem_key=None):
+                            if method=="GET" and path=="/api/v1/agents/me":
+                                return Response(200,{"id":"crewquay-agent"})
+                            if method=="GET" and path=="/api/v1/chats/community_hub":
+                                return Response(200,{**detail,"conversationId":"community_hub"})
+                            if method=="POST" and path=="/api/v1/chats/community_hub/messages":
+                                return Response(201,{"messageId":"hub_123"})
+                            if method=="GET" and path.startswith("/api/v1/chats/community_hub/messages?"):
+                                return Response(200,{"items":[{"messageId":"hub_123",
+                                    "senderId":"crewquay-agent","content":"hello"}],
+                                    "nextCursor":"1","hasMore":False})
+                            raise AssertionError(method+" "+path)
+                    client=HubClient()
+                cfg=Config(database=str(self.db.path),allow_writes=True)
+                ident=self.stage(logical="auto-"+kind,target=target)
+                report=ActionSender(self.db,cfg,client,clock=lambda:1000).drain_once(1,ident)
+                self.assertEqual(report["item_status"],"confirmed",report)
+
+    def test_group_identity_and_privileges_are_verified_by_platform(self):
         base={"conversationId":"direct-one","kind":"direct","memberCount":2,
               "canSend":True,"isObserver":False}
-        scenarios=[{"kind":"group"},{"kind":"community_hub"},
-                   {"memberCount":3},{"canSend":False},{"isObserver":True},
-                   {"conversationId":"other"}, {"canSend":"true"}]
+        scenarios=[{"memberCount":3},{"canSend":False},{"isObserver":True},
+                   {"conversationId":"other"},{"canSend":"true"},
+                   {"kind":"project","projectId":"project-unapproved"},
+                   {"kind":"community_hub"}]
         for i,changes in enumerate(scenarios):
             with self.subTest(changes=changes):
                 client,calls=self.direct_client({**base,**changes})
@@ -131,6 +171,32 @@ class Phase3Tests(unittest.TestCase):
         ident=self.stage(logical="chat-lookup-unavailable",target="other-unknown")
         report=ActionSender(self.db,self.cfg,client,clock=lambda:1000).drain_once(1,ident)
         self.assertEqual(report["blocked"],1,report)
+        self.assertFalse(any(method=="POST" for method,_ in calls))
+
+    def test_owner_contact_ban_applies_even_to_new_direct_chat(self):
+        detail={"conversationId":"direct-one","kind":"direct","memberCount":2,
+                "canSend":True,"isObserver":False,
+                "members":[{"id":"crewquay-agent"},{"id":"blocked-peer"}]}
+        client,calls=self.direct_client(detail)
+        cfg=Config(database=str(self.db.path),allow_writes=True,
+                   blocked_contact_ids=["blocked-peer"])
+        ident=self.stage(logical="contact-deny",target="direct-one")
+        report=ActionSender(self.db,cfg,client,clock=lambda:1000).drain_once(1,ident)
+        self.assertEqual(report["blocked"],1,report)
+        self.assertFalse(any(method=="POST" for method,_ in calls))
+
+    def test_owner_ban_prevents_future_writes_but_not_old_receipt_readback(self):
+        detail={"conversationId":"direct-one","kind":"direct","memberCount":2,
+                "canSend":True,"isObserver":False}
+        ident=self.stage(logical="direct-previously-posted",target="direct-one")
+        with self.db.transaction() as c:
+            c.execute("UPDATE outbox SET status='unknown',remote_id='direct-message-123' WHERE id=?",
+                      (ident,))
+        client,calls=self.direct_client(detail)
+        cfg=Config(database=str(self.db.path),allow_writes=True,
+                   blocked_chat_ids=["direct-one"])
+        report=ActionSender(self.db,cfg,client,clock=lambda:1000).drain_once(1,ident)
+        self.assertEqual(report["item_status"],"confirmed",report)
         self.assertFalse(any(method=="POST" for method,_ in calls))
 
     def test_unknown_direct_outbox_reconciles_without_reposting(self):
