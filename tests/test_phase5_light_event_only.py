@@ -218,48 +218,31 @@ class EventOnlyLightTests(unittest.TestCase):
         self.assertEqual(self.db.read("SELECT received FROM sync_cursors WHERE source='agent_events'")[0]["received"],"0")
 
     def test_small_pages_survive_upstream_large_limit_disconnect(self):
-        # Simulates an upstream that drops connections when limit >= 10.
-        # A two-page batch must keep its pinned upper bound and durable cursor.
-        class LimitedFeed:
-            def __init__(self):
-                self.requests=0
-                self.calls=[]
-
-            def request(self, method, path, *args):
-                self.requests+=1
-                self.calls.append(path)
-                if path=="/api/v1/agents/me":
-                    return Response(200,{"id":"muse"})
-                if not path.startswith("/api/v1/agent/events?"):
-                    raise AssertionError("unexpected Light request: "+path)
-                query=parse_qs(urlsplit(path).query)
-                page_limit=int(query["limit"][0])
-                if page_limit>=10:
-                    return Response(0,{"code":"TRANSPORT_FAILURE"})
-                after=int(query["after"][0])
-                upper=int(query.get("to",["7"])[0])
-                nxt=min(after+page_limit,upper)
-                items=[event(seq=i,kind="task.ready") for i in range(after+1,nxt+1)]
-                return Response(200,page(items,to=str(upper),
-                                         has_more=nxt<upper,next_cursor=str(nxt)))
-
-        fake=LimitedFeed()
-        first=Tick(self.db,self.cfg,client=fake,clock=lambda:1000).run(light=True)
+        # Exercise two *separate* Light Ticks with pinned upper cursor.
+        # Default page size must avoid the upstream limit>=10 disconnect.
+        items=[event(seq=i,kind="task.ready") for i in range(1,8)]
+        first,calls1=self.tick([Response(200,page(
+            items[:5],to="7",has_more=True,next_cursor="5"))])
         self.assertEqual(first["event_replay"],"incomplete",first)
-        checkpoint=self.db.read("SELECT received,target FROM sync_cursors WHERE source='agent_events'")[0]
+        checkpoint=self.db.read(
+            "SELECT received,target FROM sync_cursors WHERE source='agent_events'")[0]
         self.assertEqual((checkpoint["received"],checkpoint["target"]),("5","7"))
-        second=Tick(self.db,self.cfg,client=fake,clock=lambda:1060).run(light=True)
+        second,calls2=self.tick([Response(200,page(
+            items[5:],to="7",has_more=False,next_cursor="7"))],now=1060)
         self.assertEqual(second["event_replay"],"complete",second)
         self.assertEqual(second["status"],"ok",second)
-        requests=[parse_qs(urlsplit(p).query) for p in fake.calls
-                  if p.startswith("/api/v1/agent/events?")]
+        requests=[parse_qs(urlsplit(path).query) for _,path in calls1+calls2
+                  if path.startswith("/api/v1/agent/events?")]
         self.assertEqual([q["limit"] for q in requests],[["5"],["5"]])
         self.assertEqual([q["after"] for q in requests],[["0"],["5"]])
         self.assertNotIn("to",requests[0])
         self.assertEqual(requests[1]["to"],["7"])
-        self.assertEqual(self.db.read("SELECT COUNT(*) AS n FROM events WHERE source='agent_events'")[0]["n"],7)
-        final=self.db.read("SELECT received,target,failures FROM sync_cursors WHERE source='agent_events'")[0]
-        self.assertEqual((final["received"],final["target"],final["failures"]),("7",None,0))
+        self.assertEqual(self.db.read(
+            "SELECT COUNT(*) AS n FROM events WHERE source='agent_events'")[0]["n"],7)
+        final=self.db.read(
+            "SELECT received,target,failures FROM sync_cursors WHERE source='agent_events'")[0]
+        self.assertEqual((final["received"],final["target"],final["failures"]),
+                         ("7",None,0))
 
     def test_page_limit_does_not_advance_without_follow_up(self):
         e=event()
