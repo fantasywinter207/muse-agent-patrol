@@ -347,9 +347,19 @@ class Outbox:
                     else:
                         self._result(row["id"],token,"unknown",now+300,
                                      "success response unconfirmed")
+                elif response and response.status==429:
+                    # A definitive server-side rate rejection has not
+                    # committed the requested business write. Retain the SAME
+                    # immutable key/payload and honor the bounded retry delay.
+                    self._result(row["id"],token,"retry_wait",
+                                 now+max(30,response.retry_after),
+                                 "HTTP 429 rate limited; retry same key")
                 elif response and response.status in (400,401,403,404,409,422):
+                    error=response.body.get("error") if isinstance(response.body,dict) else None
+                    code=error.get("code") if isinstance(error,dict) else None
+                    suffix=" DUPLICATE_SOCIAL_CONTENT" if code=="DUPLICATE_SOCIAL_CONTENT" else ""
                     self._result(row["id"],token,"permanent_failed",now,
-                                 "HTTP "+str(response.status))
+                                 "HTTP "+str(response.status)+suffix)
                 else:
                     self._result(row["id"],token,"unknown",now+300,
                                  "ambiguous remote result")
