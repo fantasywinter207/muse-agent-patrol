@@ -70,7 +70,7 @@ class Deployment:
             ident = new_id()
             wid = enqueue_tx(c, "deployment:syn:" + run_id, "human_action",
                 {"reason": "start authenticated deployment handshake", "deployment_run_id": ident},
-                now, priority=95, start_by=now+180)
+                now, priority=75)
             c.execute("""INSERT INTO deployment_runs
                 (id,actor,run_id,nonce,handshake_id,repo_sha,state,created_at,
                  updated_at,syn_work_id)
@@ -86,7 +86,7 @@ class Deployment:
         wid=enqueue_tx(c, "deployment:bug:"+row["run_id"], "human_action",
             {"reason":"report failed CrewQuay deployment handshake",
              "deployment_run_id":row["id"],"failure_code":code},
-            now,priority=95,start_by=now+180)
+            now,priority=75)
         c.execute("""UPDATE deployment_runs SET bug_work_id=?,
             failure_code=?,updated_at=? WHERE id=?""",(wid,code,now,row["id"]))
         return wid
