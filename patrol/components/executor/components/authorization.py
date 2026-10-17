@@ -40,7 +40,10 @@ class PolicyEngine:
         if item is None or item.get("supported") is not True:
             return "DENY", "action_not_supported"
         if item.get("granted") is not True:
-            return "NEEDS_APPROVAL", item.get("denialReason") or "formal_grant_missing"
+            reason=item.get("denialReason") or "formal_grant_missing"
+            if reason=="owner_grant_revoked_or_expired":
+                return "DENY", reason
+            return "NEEDS_APPROVAL", reason
         if item.get("eligible_now") is not True:
             return "DENY", item.get("denialReason") or "business_rule_denied"
         issued = manifest.get("issuedAt")
