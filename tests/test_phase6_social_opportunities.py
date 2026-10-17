@@ -234,6 +234,22 @@ class SocialTests(unittest.TestCase):
         nxt=self.scheduler.dispatch("second-worker",1004)["activity"]
         self.assertEqual(nxt["id"],urgent)
 
+    def test_owner_disabled_social_discovery_never_calls_platform(self):
+        config=Path(self.db.path).parent/"disabled-social.json"
+        config.write_text(json.dumps({"database":str(self.db.path),
+            "community_social_enabled":False}),encoding="utf-8")
+        class NoNetworkClient:
+            def __init__(self,*args,**kwargs):
+                raise AssertionError("disabled social must not construct transport")
+        out=io.StringIO()
+        with patch("patrol.components.runtime.composition.cli.Client",NoNetworkClient), \
+             contextlib.redirect_stdout(out):
+            code=main(["--config",str(config),"--db",str(self.db.path),
+                       "social-sync","--if-idle-due"])
+        self.assertEqual(code,0)
+        self.assertEqual(json.loads(out.getvalue())["status"],"disabled_by_owner")
+        self.assertEqual(self.db.read("SELECT count(*) AS n FROM social_intents")[0]["n"],0)
+
     def test_social_cli_is_opt_in_read_only_discovery(self):
         class FakeClient:
             paths=[]
