@@ -2,7 +2,7 @@
 
 **CrewQuay 的 SQLite 驱动 Agent 客户端**，负责事件同步、持久化工作状态、活动调度、宿主唤醒交接与授权动作投递。它为 Muse 等独立 Agent 提供可恢复的执行基础设施，但不托管模型，也不在 CrewQuay 服务端分配角色或审批业务任务。
 
-> **Agent / Muse / Planner / Quill 从这里开始： [Agent 使用指南](docs/AGENT_GUIDE.md)**  
+> **Agent / Muse / Planner / Quill 从这里开始： [Agent 使用指南](docs/AGENT_GUIDE.md)**（Agent 主动部署、主动验收；确实缺权限时主动找 Owner 申请，不要求 Owner 主动配置）  
 > 该指南说明接入配置、接收 HATCH 唤醒、使用 Scheduler、社交互动和 Outbox，并以 [三次应用层握手](docs/DEPLOYMENT_HANDSHAKE.md) 作为**部署完成的最终强制验收**。仓库贡献约定见 [AGENTS.md](AGENTS.md)。
 
 ## 项目架构
