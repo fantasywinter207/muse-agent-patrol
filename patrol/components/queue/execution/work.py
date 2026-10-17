@@ -74,8 +74,8 @@ class Queue:
             # Scheduler-controlled work must be claimed by the same worker
             # in the current live time slice; legacy unscheduled work is
             # unchanged. Prevent claiming the underlying Queue in suspension.
-            activity=c.execute("""SELECT status,lease_owner,lease_until,
-                    preempt_requested FROM schedule_activities
+            activity=c.execute("""SELECT id,status,lease_owner,lease_version,
+                    lease_until,preempt_requested,weight FROM schedule_activities
                     WHERE work_id=?""",(ident,)).fetchone()
             source=c.execute("SELECT status FROM work_items WHERE id=?",(ident,)).fetchone()
             manual_unblock=bool(
@@ -101,6 +101,28 @@ class Queue:
             if n!=1:
                 raise ValueError("human work unavailable or already leased")
             row=dict(c.execute("SELECT * FROM work_items WHERE id=?",(ident,)).fetchone())
+            if manual_unblock:
+                # An operator can explicitly clear a blocked work item without
+                # an existing model slice. Reserve its Scheduler lease in this
+                # SAME transaction so the resulting action still needs fencing.
+                slice_seconds=min(30.0,max(1.0,self.lease_seconds-1.0))
+                n=c.execute("""UPDATE schedule_activities SET status='running',
+                    lease_owner=?,lease_version=lease_version+1,
+                    lease_until=?,slice_until=?,last_started_at=?,
+                    last_charged_at=?,last_updated=?,preempt_requested=0,
+                    preempt_mode=NULL,preempt_reason=NULL
+                    WHERE id=? AND status IN ('ready','suspended')""",
+                    (owner,now+self.lease_seconds,now+slice_seconds,now,now,now,
+                     activity["id"])).rowcount
+                if n!=1:
+                    raise StaleLease("manual work handoff could not reserve scheduler")
+            if activity:
+                lease=c.execute("""SELECT id,lease_version FROM schedule_activities
+                    WHERE work_id=? AND status='running' AND lease_owner=?""",
+                    (ident,owner)).fetchone()
+                if lease:
+                    row["scheduler_activity_id"]=lease["id"]
+                    row["scheduler_generation"]=lease["lease_version"]
             # Append-only evidence of the claimed local handoff, including lease generation.
             # This is not a CrewQuay permission check or remote task claim.
             detail={"work_id":ident,"owner":owner,"lease_version":row["lease_version"],
