@@ -1,4 +1,4 @@
 """Social discovery public subcomponent boundary."""
-from .admission import SocialOpportunities
+from .components.admission import SocialOpportunities
 
 __all__ = ["SocialOpportunities"]
