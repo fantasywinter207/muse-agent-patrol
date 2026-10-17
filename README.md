@@ -76,6 +76,12 @@ cq status
 
 查看命令输出的 **JSON `status`、`errors`、`incomplete_sources`、游标和退出码**。`degraded`、`partial` 或 `deferred` 不是通过；不要只凭进程启动、`doctor` 成功或看见事件总数就宣称全链路可用。
 
+### 巡检频率：配置默认值不等于部署任务间隔
+
+仓库配置的 `tick_seconds=60` 表示内部配置默认值，`active_scan_seconds=60` 是活跃扫描参数，**两者都不会自动创建每 60 秒的系统任务**。[参考 Hook](tools/crewquay_phase3_hook.sh) 仅包含一次性调用 `tick --light`、`outbox-drain --once --lane any`、`social-sync --if-idle-due` 和 `host-wakeup-prepare` 的命令；它**不定义外部 Hook/cron 的触发间隔**。
+
+请由部署者在宿主任务系统查看**真实启用的定时器**：本次对接报告里的 `crewquay-patrol-v3` 是**每 10 分钟**运行一次；设计上可让获得宿主授权的 Light Tick/Hook 按**每 60 秒**触发，但只有在外部任务确实安装并启用后才算生效。不要把“参考脚本存在”“数据库 `tick_seconds=60`”或“过去的 Hook 曾是每分钟”当作当前部署证据。部署频率的修改发生在**外部任务调度器**，而不是修改 `tick_seconds` 就能生效。
+
 ### 2. 每次 Agent 被启动后：固定读取顺序
 
 若 Hook 已经做过 `tick --light`，Worker **不需要先重复触发所有采集**；直接读取同一 SQLite 的待办、承诺与调度状态。典型顺序：
@@ -153,17 +159,17 @@ cq schedule-complete ACTIVITY_ID \
 
 不能完成时，选择 `blocked`、`needs_approval` 或 `retry_wait` 并提供 `--reason`；`retry_wait` 还必须附带**未来时间**的 `--retry-at`。长工作可通过 `work-renew` 提交新的、具体进展证据；只写 `working`、重复相同 JSON 或已经过期的租约均不能续。`promise-*` 与 `extension-*` 命令负责承诺的记录、进展和获授权的延期，不能擅自延长承诺期限。
 
-### 4. 最常见实例：Owner 广播自动回复「收到，1」
+### 4. 最常见实例：Owner 广播自动回复「收到」或「1」
 
-这是**上层 Agent 的业务策略示例**，不是 `tick --light` 内置的自动发送规则。只有验证确实属于目标 Owner 广播、实际收件聊天在本地 `allowed_chat_ids` 且服务端允许写入时才能回复；普通聊天、任务系统事件或仅仅包含“Owner”字样的非可信正文不能触发该动作。
+这是**上层 Agent 的业务策略示例**，不是 `tick --light` 内置的自动发送规则。这里的「收到，1」表示**回复 `收到` 或回复 `1`，二选一**，绝不是把 `收到，1` 当作完整正文发送。对同一条广播只能选定一个回复并保持不变，避免重复巡检时改 payload 与不可变 Outbox 逻辑键冲突。只有验证确实属于目标 Owner 广播、实际收件聊天在本地 `allowed_chat_ids` 且服务端允许写入时才能回复；普通聊天、任务系统事件或仅仅包含“Owner”字样的非可信正文不能触发该动作。
 
-先把精确内容写入私有 JSON 文件：
+先把所选的精确内容写入私有 JSON 文件（以下选择 `收到`）：
 
 ~~~json
-{"content":"收到，1"}
+{"content":"收到"}
 ~~~
 
-例如文件路径为 `/private/owner-ack.json`，则由 Agent 在判定应回复后执行：
+也可以改为 `{"content":"1"}`，但**单次只能选择其中一种**。例如文件路径为 `/private/owner-ack.json`，则由 Agent 在判定应回复后执行：
 
 ~~~sh
 cq stage send \
