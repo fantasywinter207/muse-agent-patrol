@@ -161,6 +161,14 @@ def parser():
     a.add_argument("--lease-version",type=int,required=True)
     a.add_argument("--result",required=True,choices=("accepted","confirmed_failed","unknown"))
     a.add_argument("--evidence",required=True)
+    a=sub.add_parser("wakeup-execution")
+    a.add_argument("id",help="accepted wakeup request ID")
+    a.add_argument("--wakeup-generation",type=int,required=True)
+    a.add_argument("--activity-id",required=True)
+    a.add_argument("--activity-generation",type=int,required=True)
+    a.add_argument("--worker",required=True)
+    a.add_argument("--phase",choices=("started","progress","finished"),required=True)
+    a.add_argument("--evidence",required=True)
     a=sub.add_parser("wakeup-reconcile")
     a.add_argument("id")
     a.add_argument("--proven-absent",action="store_true")
@@ -406,6 +414,11 @@ def main(argv=None):
             elif args.command=="wakeup-ack":
                 result=Wakeups(db,cfg.lease_seconds).acknowledge(
                     args.id,args.owner,args.lease_version,now,args.result,evidence(args.evidence))
+            elif args.command=="wakeup-execution":
+                result=Wakeups(db,cfg.lease_seconds).record_execution(
+                    args.id,args.wakeup_generation,args.activity_id,
+                    args.activity_generation,args.worker,args.phase,
+                    now,evidence(args.evidence))
             elif args.command=="wakeup-reconcile":
                 result=Wakeups(db,cfg.lease_seconds).reconcile_unknown(
                     args.id,now,args.proven_absent,evidence(args.evidence))
