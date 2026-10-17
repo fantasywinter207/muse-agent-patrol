@@ -42,6 +42,35 @@ class WakeupExecutionReceiptsTests(unittest.TestCase):
         self.assertIsNone(self.wake.claim_next("hatch",1304))
         self.assertEqual(self.wake.stage(1304),0)
 
+    def test_accepted_no_start_only_retries_with_explicit_absence_proof(self):
+        ident,wake=self.accepted_work()
+        with self.assertRaises(ValueError):
+            self.wake.reconcile_accepted_no_start(wake["id"],1305,False,
+                {"reason":"no proof"})
+        recovered=self.wake.reconcile_accepted_no_start(wake["id"],1306,True,
+            {"host_audit":"session definitively not started"})
+        self.assertEqual(recovered["status"],"retry_wait")
+        self.assertTrue(recovered["original_host_acceptance_preserved"])
+        receipt=self.db.read("SELECT dispatch_evidence FROM wakeup_requests WHERE id=?",
+                             (wake["id"],))[0]["dispatch_evidence"]
+        self.assertIn("host_receipt",receipt)
+        repeat=self.wake.claim_next("hatch",1307)
+        self.assertEqual(repeat["id"],wake["id"])
+        self.assertGreater(repeat["lease_version"],wake["lease_version"])
+
+    def test_started_execution_refuses_accepted_no_start_reconciliation(self):
+        ident,wake=self.accepted_work()
+        run=self.schedule.dispatch("muse",1002)["activity"]
+        self.wake.record_execution(wake["id"],wake["lease_version"],
+            run["id"],run["lease_version"],"muse","started",1003,
+            {"session":"actually started"})
+        with self.assertRaises(StaleLease):
+            self.wake.reconcile_accepted_no_start(wake["id"],1305,True,
+                {"claim":"not started"})
+        self.assertEqual(self.db.read(
+            "SELECT status FROM wakeup_requests WHERE id=?",(wake["id"],))[0]["status"],
+            "accepted")
+
     def test_started_progress_finished_need_correct_worker_and_generation(self):
         wid,wake=self.accepted_work()
         running=self.schedule.dispatch("muse",1002)["activity"]
