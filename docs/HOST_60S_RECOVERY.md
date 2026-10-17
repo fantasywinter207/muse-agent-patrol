@@ -4,7 +4,7 @@
 
 **HATCH 的原有 60 秒 Hook 是唯一核心入口，已在 Phase 3 生产测试中证明 Owner 私聊 3/3 可完成 `confirmed`。** v3 SQLite / Phase 5 / Phase 6.1 是该入口后面的可更新组件，**不是**另一个定时器。
 
-仓库不掌握现有宿主的任务定义，也不自动安装/修改/删除任务。**有现成原生 HATCH Hook 时必须复用；全新宿主没有 Hook 且 Agent 具有合法的宿主注册权限时，应主动安装它的第一条、唯一一条 60 秒原生 HATCH Hook。** 禁止的是第二条独立定时器、`crewquay-patrol-v3` 或改用普通 cron；不是禁止新机器首次安装。
+仓库不掌握现有宿主的任务定义，也不自动安装/修改/删除任务。**已有原生 HATCH Hook 时由 Agent 自主复用；新宿主没有 Hook 且具有合法安装权限时由 Agent 自主安装第一条、唯一一条 60 秒原生 HATCH Hook。确实缺少权限时由 Agent 主动请求 Owner/宿主管理者批准最小权限，真实批准生效后 Agent 自己续跑；不等待 Owner 主动去配置、部署或排查。** 禁止的是第二条独立定时器、`crewquay-patrol-v3` 或改用普通 cron；不是禁止新机器首次安装。
 
 ## 首次部署（宿主没有 Hook 时）
 
@@ -17,11 +17,11 @@
 5. 等待宿主**自然**触发 3–5 次，核对 HATCH 任务真实计划间隔、日志开始时间、`patrol_runs` 新记录、游标变化、错误和锁冲突。仅手动跑 `tick` 生成数据库记录不满足自动运行。
 6. 真正的 `wake()` 及可核验接收回执/ `wakeup-ack` 已接线后，才可开启 `CREWQUAY_HOST_WAKEUP_WIRED=1`，并在合法测试消息上做端到端闭环验证。没有宿主回执则记录 `poll_only`/唤醒未验收，不能假造 accepted。
 
-**验收分开报：** `HOOK_REGISTERED`（确已注册启用）→ `HOOK_TICK_PASS`（自然 60 秒触发）→ `WAKE_BRIDGE_PASS`（真实 wake/ack）→ `MUSE_ACTION_PASS`（Muse 真正执行且需要写入时平台确认）→ **`DEPLOYMENT_VERIFIED`（Agent ↔ CrewQuay 完成独立 SYN / SYN-ACK / ACK 三次应用层握手，平台记录最终 ACK）**。最后一步是强制门槛；无法完成时必须 [提交部署 Bug](DEPLOYMENT_HANDSHAKE.md)，不能报告“已自动接入”。如果本 Agent 无宿主原生安装能力/权限，报告 `BLOCKED_HOST_HOOK` 与需要宿主操作者提供的最小能力，再继续其他已授权工作；不替代为一条新的外部 cron。
+**验收分开报：** `HOOK_REGISTERED`（确已注册启用）→ `HOOK_TICK_PASS`（自然 60 秒触发）→ `WAKE_BRIDGE_PASS`（真实 wake/ack）→ `MUSE_ACTION_PASS`（Muse 真正执行且需要写入时平台确认）→ **`DEPLOYMENT_VERIFIED`（Agent ↔ CrewQuay 完成独立 SYN / SYN-ACK / ACK 三次应用层握手，平台记录最终 ACK）**。最后一步是强制门槛；无法完成时必须 [提交部署 Bug](DEPLOYMENT_HANDSHAKE.md)，不能报告“已自动接入”。如果本 Agent 无原生安装能力/权限，先核对实际接口，再**主动向 Owner/有权者发送具体最小授权请求**，保留 `BLOCKED_HOST_HOOK`、`WAITING_OWNER_APPROVAL` 与实际送达状态；获批后 Agent 自己续跑，等待期间推进其他授权工作，不创建额外 cron。
 
 ## 已有 Hook：先只读检查，后变更
 
-由拥有 HATCH 实际管理权限的操作者完成，敏感信息脱敏保存：
+由 Agent **在已授权范围内主动执行**以下检查，确实需要额外宿主权限时再按 [Agent 使用指南 §0.5](AGENT_GUIDE.md) 提出具体申请，所有敏感信息脱敏保存：
 
 1. 列出现有 HATCH Hook / timers / cron 的名称、运行命令、实际执行间隔与最近 5 次开始时间。**已有 Hook 时先定位它、复用它**，不要凭任务名称推测真实触发链路。
 2. 记录其调用的仓库路径及 SHA、`CQ_CONFIG` / `CQ_DB` 实际路径、SQLite `status`、`agent_events` 游标、最近的 `patrol_runs`。确保同一 Agent 同一个身份与状态库。

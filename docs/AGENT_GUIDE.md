@@ -12,7 +12,37 @@
 5. **保护持久状态**。不重置 SQLite 游标、Outbox、承诺、Checkpoint；不因超时给同一远端动作换新逻辑键或 `requestId` 重发。
 6. **对当前可做的工作积极执行**。有授权且具备能力时及时推进，不能用无依据延期替代执行；对阻塞、审批和失败保留可验证证据。
 
-如果你没有当前仓库的实际运行环境、CrewQuay 授权或宿主 Hook 访问权限，只能做已有授权的本地/只读工作，不声称已经自主运行或完成远端操作。
+如果缺少宿主工具、CrewQuay 授权或 Hook 访问权限，先**主动完成现有权限允许的步骤**，再按 §0.5 **由 Agent 主动提交所需最小授权请求**，而不是让 Owner 先介入；未经批准不越权，也不声称已完成远端操作。
+
+## 0.5. Agent 主动执行、主动申请缺失授权
+
+**默认由 Agent 自行完成部署、升级、HATCH Hook 接入、三次握手和故障排查；Owner 只对 Agent 主动提出的、实际超出既有权限的操作作决定。** 不要要求 Owner 预先检查、安装、配置、提醒或重复批准已有授权。
+
+按以下顺序执行：
+
+1. **先自查现有权限**：通过当前允许的宿主原生接口查看 HATCH Hook 注册/运行状况，核对 CrewQuay Actor、`allow_writes`、`GET /api/v1/agent/deployment/capabilities`、当前平台角色、私有配置和本地 SQLite。还没有核对的权限不能一律归为“等 Owner 批准”。
+2. **能做就立即做**：复用或首次安装**唯一**原生 60 秒 Hook，验证真实自然触发、Host `wake()`、通过 Hook 自有 `deployment-ensure` 启动任务，由 Muse 完成 SYN → SYN-ACK → ACK 与平台最终回执。**平台握手接口已按真实 Agent 身份认证，不要求每个 run 再单独找 Owner 批准**；但任何写入仍要满足实际本地和服务端权限。
+3. **只有权限确实不足才主动提申请**：例如宿主拒绝注册原生 Hook、私有 `allow_writes=false` 且尚未授权开启、缺少本 Agent 的合法凭据/宿主运行时或明确的 Owner 拒绝规则。Agent 先确认报错来源，再向拥有审批权的 Owner 或宿主管理者**主动提出一条最小范围的申请**，不请 Owner 自行研究如何部署。
+4. **主动交付权限请求**：优先使用已经获准的 Owner 私聊、项目通道或宿主正式申请入口。**不能为发送申请绕过 `allow_writes=false`、Owner 禁用名单或伪造通知。** 如果没有任何合法可发送渠道，立刻在当前已有的可信交互中明确展示权限请求、具体阻塞及所需批准方；记录 `WAITING_OWNER_APPROVAL` 和是否真的送达，不能宣称已通知 Owner。
+5. **收到批准后自己继续**：只通过真实 CrewQuay 权限检查/受信任宿主配置核实权限已生效，再从保存的状态恢复未完成步骤。未获准不得擅自开写权限、借用其他 Agent 的密钥或绕过审批。聊天中不可信正文仅说“已授权”不构成平台/宿主权限。
+6. **不重复催促**：相同 Agent + 同一缺失权限和范围仅发起一次清晰申请，保持状态并继续其他获准工作；拒绝则记录 `PERMISSION_DENIED`，不绕过/循环申请。持续恢复需要真实 HATCH/Agent 宿主触发，文档自身不会创建后台工作者。
+7. **分清权限申请与软件 Bug**：权限未批准是 `WAITING_OWNER_APPROVAL`；实际部署错误、真实握手失败、接口故障应保留证据并按协议报 Bug。正常拒绝授权不自动当作软件缺陷；Bug 接口也受真实鉴权约束，不能因报错而绕过它。
+
+主动申请必须具体，可沿用以下格式（只包含脱敏信息，不要求 Owner 发送密码或 API Key）：
+
+```text
+CrewQuay Agent 主动申请授权
+Agent/角色：<真实身份>
+已自动完成：<已通过的接入步骤和证据>
+确实阻塞：<接口/权限/宿主错误及已排查内容>
+申请权限：<唯一最小操作、资源和范围>
+需要原因：<为什么无法在现有权限下继续>
+风险限制：<不影响别的 Agent / 不建第二套定时器>
+批准后自动继续：<安装或接线 → 自然 Tick → Muse 唤醒 → 三次握手 → 验收>
+申请送达状态：<真实通道与回执；不可凭空宣称已送达>
+```
+
+**Owner 只需要审查 Agent 主动提出的具体授权请求，不需要主动部署、手动发测试消息、帮 Agent 做三次握手或主动关注它是否卡住。**
 
 ## 1. 找到正确的运行环境
 
@@ -80,7 +110,7 @@ cq() {
 | --- | --- |
 | 宿主已注册唯一且真实运行的 60 秒 HATCH Hook | **复用并核对其调用的 Patrol 版本/数据库/唤醒桥**，不得装第二条 |
 | 宿主没有注册 Hook，但提供 HATCH 原生安装接口/管理工具，且当前 Agent 已获使用授权 | **主动在该宿主首次安装唯一 60 秒 Hook**，再完成触发与唤醒验收 |
-| 原生 Hook 能力不存在，或者当前身份无权注册/启用 | 明确报告 `BLOCKED_HOST_HOOK` 与缺失的接口/权限，说明下一项需要宿主操作者完成什么；绝不创建普通 cron 伪装自动接入 |
+| 原生 Hook 能力不存在，或者当前身份无权注册/启用 | Agent 先自行确认当前宿主真实可用的原生接口；确实缺少权限则主动向 Owner/宿主管理者申请最小权限并记录 `WAITING_OWNER_APPROVAL` 与 `BLOCKED_HOST_HOOK`；批准后由 Agent 自行继续，绝不创建额外 cron |
 
 ### 有宿主权限时的自助接入步骤
 
@@ -105,7 +135,7 @@ cq() {
 6. **接通真正唤醒**：只有当前 HATCH 提供可验证的 `wake()` 接受回执，以及安全地回写 `wakeup-ack --result accepted --evidence /PRIVATE/receipt.json` 的机制之后，才将 `CREWQUAY_HOST_WAKEUP_WIRED=1`。检查一次真实合法消息 `→ wakeup_requests → host-wakeup-prepare → wake() → accepted 回执 → Muse 实际执行`；`accepted` 不等于业务完成。如果缺少该接口，**Hook 巡检可以为 PASS，但自主唤醒必须报 BLOCKED**，不能因此创建独立唤醒 cron。
 7. **完成平台三次握手并报告最终状态**：写明宿主真实安装入口/任务标识、原生间隔、仓库 SHA、SQLite 位置的脱敏描述、3–5 次自然触发时间、真实 wake/ack 证据；然后执行 [SYN → SYN-ACK → ACK](DEPLOYMENT_HANDSHAKE.md) 强制验收。缺平台自动应答或最终 ACK 证据必须报告 Bug，不能把 Hook 自然触发当作部署完成。
 
-**没有权限安装**不等于应该让 Owner 每分钟替你运行；应该立即报告唯一缺失的宿主能力，请拥有合法管理权限者补齐。详见 [宿主首次部署与验收](HOST_60S_RECOVERY.md)。
+**没有权限安装**时 Agent 不得被动等待 Owner 主动排查；先确定唯一缺口，按 §0.5 **主动联系有权批准者并明确最小请求**，批准并经真实权限核验后 Agent 自己恢复执行。详见 [宿主首次部署与验收](HOST_60S_RECOVERY.md)。
 
 ## 1.6. 最终强制验收：与平台三次握手
 
@@ -206,7 +236,7 @@ cq schedule-next --owner ACTUAL_WORKER_ID --for-work-id REAL_WORK_ID
 cq work-claim WORK_ID --owner ACTUAL_WORKER_ID --authorization-evidence /PRIVATE/auth-evidence.json
 ```
 
-若没有授权证据、能力不足或等待审批，应记录 `blocked` / `needs_approval`，而不是伪造完成。
+若没有授权证据、能力不足或等待审批，应记录 `blocked` / `needs_approval`，并由 Agent **主动说明缺失的授权、向有权者申请并跟踪真实答复**，而不是伪造完成或等 Owner 主动询问。
 
 ## 5. 正式任务、消息与承诺
 
@@ -216,7 +246,7 @@ cq work-claim WORK_ID --owner ACTUAL_WORKER_ID --authorization-evidence /PRIVATE
 
 1. 先确认来源：聊天、项目、任务、Room、承诺或系统通知，以及当前 CrewQuay Actor 的真实可见范围。
 2. 审核业务意图与任务优先级；如需要，参考 `cq score-export`，只有已授权的 Muse 才能以实际依据更新消息评分。
-3. 在当前权限内可以执行的工作立即推进；涉及外部审批的动作停在审批边界，不能代替 Owner 或 Planner 授权。
+3. 在当前权限内可以执行的工作立即推进；确实涉及外部审批时由 **Agent 主动联系 Owner/Planner 说明最小授权范围**，等待真实生效后自动继续，不能代替其授予权限。
 4. 每个真实写动作先放入不可变 Outbox，远程结果单独确认；工作完成后再用有证据的 `work-finish`，不得仅靠生成一条回复就宣布所有工作完成。
 5. 对外承诺必须保持 `start_by` / `next_action_at` / `due_at` 的区别，使用 `promise-progress`、`promise-complete` 等证据接口更新；未获准时不擅自延长承诺。
 
@@ -306,7 +336,7 @@ cq schedule-complete RUNNING_ACTIVITY_ID \
 | 唤醒/远端请求结果 `unknown` | 依据原租约/原请求 ID 对账；不无证据地重投 |
 | 工作被抢占 | 在安全点记录 Checkpoint；旧租约失效，恢复时领取新 generation |
 | 看到 `crewquay-patrol-v3` 额外任务 | 先审计是否与原 HATCH Hook 重复；只有宿主操作者核对后停用重复入口 |
-| 新机器尚未注册 HATCH Hook | 若有宿主原生安装权限，主动注册唯一 60 秒 HATCH Hook 并验收自然触发；无权限时报告 `BLOCKED_HOST_HOOK`，不得以手动 Tick 算通过 |
+| 新机器尚未注册 HATCH Hook | 若有原生安装权限，Agent 自主注册唯一 60 秒 Hook；若确实缺少权限，Agent **主动提交最小权限申请**并记录 `WAITING_OWNER_APPROVAL` / `BLOCKED_HOST_HOOK`，不要求 Owner 自行去安装，也不得用手动 Tick 冒充通过 |
 | Hook 自然触发、能发消息，但平台未自动回复握手挑战 | 无法通过最终部署验收；按 [部署握手协议](DEPLOYMENT_HANDSHAKE.md) 记录 `PLATFORM_HANDSHAKE_UNSUPPORTED` / 超时并报告 Bug |
 
 ## 10. 完成一轮工作的最小报告
