@@ -291,7 +291,7 @@ def main(argv=None):
                 result={"status":"ok","catalog":remote.body} if remote.status==200 else {"status":"failed","remote_status":remote.status}
             elif args.command=="platform-events":
                 from urllib.parse import urlencode
-                limit=cfg.agent_events_page_limit if args.limit is None else args.limit
+                limit=cfg.light_events_page_size if args.limit is None else args.limit
                 if not args.after.isdecimal() or not 1<=limit<=100:
                     raise ValueError("invalid cursor or page limit")
                 client=Client(cfg,credential_provider(cfg))
