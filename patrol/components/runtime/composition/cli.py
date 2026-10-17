@@ -68,7 +68,7 @@ def parser():
     a.add_argument("id")
     a=sub.add_parser("platform-events")
     a.add_argument("--after",default="0")
-    a.add_argument("--limit",type=int,default=50)
+    a.add_argument("--limit",type=int,default=None)
     t=sub.add_parser("tick")
     t.add_argument("--offline",action="store_true")
     t.add_argument("--ws",action="store_true")
@@ -291,11 +291,12 @@ def main(argv=None):
                 result={"status":"ok","catalog":remote.body} if remote.status==200 else {"status":"failed","remote_status":remote.status}
             elif args.command=="platform-events":
                 from urllib.parse import urlencode
-                if not args.after.isdecimal() or not 1<=args.limit<=100:
+                limit=cfg.agent_events_page_limit if args.limit is None else args.limit
+                if not args.after.isdecimal() or not 1<=limit<=100:
                     raise ValueError("invalid cursor or page limit")
                 client=Client(cfg,credential_provider(cfg))
                 remote=client.request("GET","/api/v1/agent/events?"+
-                    urlencode({"after":args.after,"limit":args.limit}))
+                    urlencode({"after":args.after,"limit":limit}))
                 result={"status":"ok","page":remote.body} if remote.status==200 else {"status":"failed","remote_status":remote.status}
             elif args.command=="stage":
                 with open(args.payload_file,encoding="utf-8") as f:
