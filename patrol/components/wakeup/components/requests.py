@@ -298,7 +298,11 @@ class Wakeups:
             else:
                 promise=c.execute("SELECT work_item_id FROM promises WHERE id=?",
                                   (wake["source_id"],)).fetchone()
-                matched=bool(promise and activity["work_id"]==promise["work_item_id"])
+                matched=bool(promise and (
+                    activity["work_id"]==promise["work_item_id"] or
+                    activity["logical_key"]==
+                    "promise_due:"+wake["logical_key"][len("promise:"):]
+                ))
             if not matched:
                 raise StaleLease("wakeup source does not belong to activity")
             prior=c.execute("SELECT * FROM wakeup_execution_receipts WHERE wakeup_id=?",
