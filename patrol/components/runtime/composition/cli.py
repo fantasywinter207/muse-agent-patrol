@@ -12,7 +12,7 @@ from datetime import datetime
 from dataclasses import replace
 from pathlib import Path
 from ...config.index import load_config
-from ...deployment import Deployment
+from ...deployment.index import Deployment
 from ...host.index import HostHandoff
 from ...migration.index import migrate_legacy
 from ...outbox.index import Outbox
