@@ -48,6 +48,24 @@ class Phase3Tests(unittest.TestCase):
                 raise AssertionError("unanticipated API "+method+" "+path)
         return Client(),calls
 
+    def direct_client(self, detail, message_id="direct-message-123"):
+        calls=[]
+        class Client:
+            def request(self,method,path,payload=None,idem_key=None):
+                calls.append((method,path))
+                if method=="GET" and path=="/api/v1/agents/me":
+                    return Response(200,{"id":"crewquay-agent"})
+                if method=="GET" and path=="/api/v1/chats/direct-one":
+                    return Response(200,detail)
+                if method=="POST" and path=="/api/v1/chats/direct-one/messages":
+                    return Response(201,{"messageId":message_id})
+                if method=="GET" and path.startswith("/api/v1/chats/direct-one/messages?"):
+                    return Response(200,{"items":[{"messageId":message_id,
+                        "senderId":"crewquay-agent","content":"hello"}],
+                        "nextCursor":"1","hasMore":False})
+                raise AssertionError("unexpected request "+method+" "+path)
+        return Client(),calls
+
     def stage(self,logical="action-1",actor="crewquay-agent",target="owner",content="hello",producer="hook-worker"):
         return self.outbox.stage(logical,actor,"send",target,
                                  {"content":content},1000,producer_id=producer)
@@ -73,6 +91,59 @@ class Phase3Tests(unittest.TestCase):
         again=ActionSender(self.db,self.cfg,client,clock=lambda:1001).drain_once(1,ident)
         self.assertEqual(again["item_status"],"confirmed")
         self.assertEqual(len([x for x in calls if x[0]=="POST"]),1)
+
+    def test_existing_writable_direct_chat_does_not_need_allowlist(self):
+        detail={"conversationId":"direct-one","kind":"direct","memberCount":2,
+                "canSend":True,"isObserver":False}
+        client,calls=self.direct_client(detail)
+        ident=self.stage(logical="direct-open",target="direct-one")
+        report=ActionSender(self.db,self.cfg,client,clock=lambda:1000).drain_once(1,ident)
+        self.assertEqual(report["item_status"],"confirmed",report)
+        self.assertIn(("GET","/api/v1/chats/direct-one"),calls)
+        self.assertEqual(sum(method=="POST" for method,_ in calls),1)
+
+    def test_owner_denial_overrides_both_auto_direct_and_explicit_allowlist(self):
+        detail={"conversationId":"direct-one","kind":"direct","memberCount":2,
+                "canSend":True,"isObserver":False}
+        client,calls=self.direct_client(detail)
+        cfg=Config(database=str(self.db.path),allow_writes=True,
+                   allowed_chat_ids=["direct-one"],blocked_chat_ids=["direct-one"])
+        ident=self.stage(logical="owner-block",target="direct-one")
+        report=ActionSender(self.db,cfg,client,clock=lambda:1000).drain_once(1,ident)
+        self.assertEqual(report["blocked"],1,report)
+        self.assertFalse(any(path=="/api/v1/chats/direct-one" for _,path in calls))
+        self.assertFalse(any(method=="POST" for method,_ in calls))
+
+    def test_group_observer_or_unwritable_chat_cannot_bypass_group_allowlist(self):
+        base={"conversationId":"direct-one","kind":"direct","memberCount":2,
+              "canSend":True,"isObserver":False}
+        scenarios=[{"kind":"group"},{"kind":"community_hub"},
+                   {"memberCount":3},{"canSend":False},{"isObserver":True},
+                   {"conversationId":"other"}, {"canSend":"true"}]
+        for i,changes in enumerate(scenarios):
+            with self.subTest(changes=changes):
+                client,calls=self.direct_client({**base,**changes})
+                ident=self.stage(logical="chat-denied-"+str(i),target="direct-one")
+                report=ActionSender(self.db,self.cfg,client,clock=lambda:1000).drain_once(1,ident)
+                self.assertEqual(report["blocked"],1,report)
+                self.assertFalse(any(method=="POST" for method,_ in calls))
+        client,calls=self.direct_client(base)
+        ident=self.stage(logical="chat-lookup-unavailable",target="other-unknown")
+        report=ActionSender(self.db,self.cfg,client,clock=lambda:1000).drain_once(1,ident)
+        self.assertEqual(report["blocked"],1,report)
+        self.assertFalse(any(method=="POST" for method,_ in calls))
+
+    def test_unknown_direct_outbox_reconciles_without_reposting(self):
+        detail={"conversationId":"direct-one","kind":"direct","memberCount":2,
+                "canSend":True,"isObserver":False}
+        ident=self.stage(logical="unknown-direct",target="direct-one")
+        with self.db.transaction() as c:
+            c.execute("UPDATE outbox SET status='unknown',remote_id='direct-message-123' WHERE id=?",
+                      (ident,))
+        client,calls=self.direct_client(detail)
+        report=ActionSender(self.db,self.cfg,client,clock=lambda:1000).drain_once(1,ident)
+        self.assertEqual(report["item_status"],"confirmed",report)
+        self.assertFalse(any(method=="POST" for method,_ in calls))
 
     def test_executor_refuses_mismatched_authenticated_actor(self):
         ident=self.stage()
