@@ -66,7 +66,7 @@ def parser():
     a=sub.add_parser("deployment-status")
     a.add_argument("--id")
     sub.add_parser("deployment-reconcile")
-    for phase in ("syn","ack"):
+    for phase in ("syn","ack","bug"):
         a=sub.add_parser("deployment-stage-"+phase)
         a.add_argument("id",help="durable deployment run ID, NOT handshake ID")
         a.add_argument("--owner",required=True)
@@ -310,8 +310,7 @@ def main(argv=None):
                         reply.body.get("synAckEventType")!="deployment.syn_ack" or
                         reply.body.get("platformSenderId")!="crewquay-platform" or
                         reply.body.get("windowSeconds")!=300):
-                    result={"status":"PLATFORM_HANDSHAKE_UNSUPPORTED",
-                            "deployment_verified":False}
+                    result=Deployment(db).unsupported(now,args.repo_sha)
                 else:
                     result=Deployment(db).start(now,args.repo_sha)
             elif args.command=="deployment-status":
@@ -319,7 +318,7 @@ def main(argv=None):
             elif args.command=="deployment-reconcile":
                 result={"local_transitions":Deployment(db).reconcile(now),
                         "remote_action_issued":False}
-            elif args.command in ("deployment-stage-syn","deployment-stage-ack"):
+            elif args.command in ("deployment-stage-syn","deployment-stage-ack","deployment-stage-bug"):
                 if not cfg.allow_writes:
                     raise ValueError("deployment outbound writes disabled")
                 phase=args.command[len("deployment-stage-"):]
