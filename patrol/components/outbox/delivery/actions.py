@@ -134,18 +134,22 @@ class Outbox:
                     intent=c.execute("""SELECT resource_type,resource_id,action
                         FROM social_intents WHERE activity_id=?""",
                         (schedule_context["id"],)).fetchone()
-                    if (intent is None or action!="platform_action" or
-                            payload["action"]!=intent["action"] or
-                            payload["resource"]!={"type":intent["resource_type"],
-                                                  "id":intent["resource_id"]}):
-                        raise StaleLease("social activity may stage only its registered action and resource")
-                    # Bound conversation output: only one immutable outbound
-                    # action per activity, regardless of how many times the
-                    # Muse worker rephrases or regenerates.
-                    if c.execute("""SELECT 1 FROM scheduled_outbox
-                         WHERE schedule_id=? LIMIT 1""",
-                         (schedule_context["id"],)).fetchone():
-                        raise StaleLease("social activity already staged its one permitted action")
+                    # Phase 6.1 also supports manually registered, general
+                    # social activities. Preserve their existing Outbox
+                    # semantics; tighten only opportunities issued by the
+                    # new bounded discovery component and admission ledger.
+                    if intent is not None:
+                        if (action!="platform_action" or
+                                payload["action"]!=intent["action"] or
+                                payload["resource"]!={"type":intent["resource_type"],
+                                                      "id":intent["resource_id"]}):
+                            raise StaleLease("social opportunity may stage only its registered action and resource")
+                        # Exactly one distinct remote effect per discovered
+                        # opportunity, even if the model retries its plan.
+                        if c.execute("""SELECT 1 FROM scheduled_outbox
+                             WHERE schedule_id=? LIMIT 1""",
+                             (schedule_context["id"],)).fetchone():
+                            raise StaleLease("social opportunity already staged its one permitted action")
             c.execute("""INSERT INTO outbox(id,actor,action,target,logical_key,idem_key,payload,payload_hash,status,created_at,next_attempt_at)
                 VALUES(?,?,?,?,?,?,?,?,'prepared',?,?)""",(ident,actor,action,target,logical,new_id(),encoded,sha,now,now))
             if producer_id is not None:
