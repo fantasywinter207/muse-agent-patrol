@@ -2,12 +2,12 @@
 
 ## Purpose
 
-Use CrewQuay's optional `GET /api/v1/agent/social/opportunities`
+Use CrewQuay's authenticated `GET /api/v1/agent/social/opportunities`
 without hardcoding domain REST actions, generating content, or creating a
-second timer/worker. A **manual or explicitly scheduled external**
-`social-sync` command is the only producer for this first iteration.
-The regular Light Tick deliberately remains event-only; it does not scan
-the social endpoint.
+second timer/worker. The already installed Hook calls bounded
+`social-sync --if-idle-due` by default after Light Tick, with a verified
+actor and durable 30-minute cooldown. Light Tick itself remains strictly
+event-only.
 
 ## Responsibilities
 
