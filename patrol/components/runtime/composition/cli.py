@@ -144,7 +144,9 @@ def parser():
     a.add_argument("--reason",required=True)
     a.add_argument("--evidence",required=True)
     a=sub.add_parser("host-wakeup-prepare")
-    a.add_argument("--include-social",action="store_true")
+    # Legacy argument remains accepted, but idle social is already the
+    # default. It no longer authorizes a privileged operation.
+    a.add_argument("--include-social",action="store_true",help=argparse.SUPPRESS)
     a.add_argument("--owner",required=True,
                    help="approved HATCH Hook identifier, not a platform actor")
     a=sub.add_parser("wakeup-stage")
@@ -266,14 +268,11 @@ def main(argv=None):
             elif args.command=="social-sync":
                 if not 1<=args.limit<=20 or not 1<=args.max_new<=3:
                     raise ValueError("social-sync limit must be 1..20 and max-new 1..3")
-                # Explicit manual discovery is read-only, even if writes are
-                # disabled. Hook idle auto-discovery requires full opt-in.
-                auto_allowed=(cfg.allow_writes and cfg.allow_community_actions
-                    and any(name.startswith("community.") for name
-                            in cfg.allowed_platform_actions))
-                if args.if_idle_due and not auto_allowed:
-                    result={"status":"disabled","remote_action_issued":False}
-                elif args.if_idle_due and not SocialOpportunities(db).reserve_idle_discovery(now):
+                # Discovering public social opportunities is read-only and
+                # available to any identity already verified in this local
+                # Agent database, regardless of outbound-write permission.
+                # The existing SQLite cooldown and work-priority rules apply.
+                if args.if_idle_due and not SocialOpportunities(db).reserve_idle_discovery(now):
                     result={"status":"not_due_or_busy","remote_action_issued":False}
                 else:
                     client=Client(cfg,credential_provider(cfg))
@@ -387,12 +386,11 @@ def main(argv=None):
                                               args.reason,evidence(args.evidence),now)
             
             elif args.command=="host-wakeup-prepare":
-                allow_social=(args.include_social and cfg.allow_writes and
-                    cfg.allow_community_actions and any(
-                        name.startswith("community.") for name
-                        in cfg.allowed_platform_actions))
+                # The host decides which authenticated Agent gets a time
+                # slice. Social is normal low-priority Agent work; platform
+                # action permissions are evaluated separately at send time.
                 result=HostHandoff(db,cfg.lease_seconds).prepare(
-                    args.owner,now,allow_social=allow_social)
+                    args.owner,now,allow_social=True)
             elif args.command=="wakeup-stage":
                 result={"staged":Wakeups(db,cfg.lease_seconds).stage(now,threshold=cfg.wakeup_min_score),
                         "host_called":False}

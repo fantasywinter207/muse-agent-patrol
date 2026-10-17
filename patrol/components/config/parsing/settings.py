@@ -32,7 +32,6 @@ class Config:
     wakeup_min_score: int = 70
     lease_seconds: int = 120
     allow_writes: bool = False
-    allow_community_actions: bool = False
     actor_id: str = ""
     allowed_chat_ids: list = field(default_factory=list)
     project_ids: list = field(default_factory=list)
@@ -53,7 +52,7 @@ class Config:
             raise ValueError("wakeup score must be an integer 0..100")
         if self.light_tick_budget_seconds<2:
             raise ValueError("light budget must allow a bounded HTTP request")
-        if (type(self.allow_writes) is not bool or type(self.allow_community_actions) is not bool or
+        if (type(self.allow_writes) is not bool or
                 type(self.ack_single_enabled) is not bool):
             raise ValueError("write flags must be booleans")
         # A message seen on the next idle tick must still be eligible to open attention.
@@ -86,6 +85,13 @@ def load_config(path=None, **overrides):
         if not isinstance(data, dict):
             raise ValueError("config must be an object")
     data.update({k: v for k, v in overrides.items() if v is not None})
+    # The former extra community switch is superseded by authenticated
+    # platform Action Registry permissions and the existing global send
+    # gate. Accept historical JSON files without making their stale value
+    # silently disable social discovery or require operator migration.
+    legacy = data.pop("allow_community_actions", None)
+    if legacy is not None and type(legacy) is not bool:
+        raise ValueError("obsolete allow_community_actions must be boolean")
     allowed = {f.name for f in fields(Config)}
     if set(data) - allowed:
         raise ValueError("unknown config keys: " + ",".join(sorted(set(data) - allowed)))

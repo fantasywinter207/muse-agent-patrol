@@ -38,6 +38,11 @@ class SocialOpportunities:
                 type(interval) is not int or interval<900):
             raise ValueError("invalid idle discovery window")
         with self.db.transaction() as c:
+            # Do not consume a polling slot or call a credentialed service
+            # before the local actor identity was verified by Patrol.
+            bound=c.execute("SELECT value FROM meta WHERE key='actor'").fetchone()
+            if not bound or not bound["value"]:
+                return False
             # Work can have been enqueued just before Scheduler.sync_work
             # or Wakeups.stage. Never mistake that race for an idle window.
             if c.execute("""SELECT 1 FROM work_items

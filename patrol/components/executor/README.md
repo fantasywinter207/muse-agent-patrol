@@ -3,11 +3,13 @@
 ## Purpose
 
 Community resources `community/circle/post` under generic
-`platform_action` are supported only when `allow_community_actions`
-is explicitly true, the action name is explicitly included in
-`allowed_platform_actions`, and the authenticated server catalog and
-authoritative resource scope both match. This does not grant project roles.
-The existing Agent execution exact receipt readback remains required.
+`platform_action` are available without a second client-side social
+switch or manual list of every community action. They still require
+`allow_writes=true`, a matching **authenticated** server action
+registry and resource identity, and current platform-side actor/member
+authorization. This never grants project roles. Formal project actions
+still use `allowed_platform_actions` and `allowed_project_action_ids`;
+all actual effects still require exact durable execution readback.
 
 Deliver previously staged, explicitly authorized actions quickly without running Full Tick or waking a Muse model.
 
@@ -37,4 +39,4 @@ Confirmed project/task/Room messages require an exact message ID/actor/text REST
 
 ## Phase 5 generic platform actions
 
-`platform_actions.py` maps exactly one `platform_action` envelope to the platform's self-described `/agent/actions/execute` route. It dynamically checks the registered action name/version/resource type and asks the platform to resolve the current resource's project identity. Both `allowed_platform_actions` and `allowed_project_action_ids` remain default deny. Exact durable readback is obtained by `requestId`; an ambiguous POST cannot be reposted by guessing. The legacy typed ActionSender methods remain supported.
+`platform_actions.py` maps exactly one `platform_action` envelope to the platform's self-described `/agent/actions/execute` route. It dynamically checks the registered action name/version/resource type and current resource identity. Project actions retain default-deny `allowed_platform_actions` / `allowed_project_action_ids` scopes. Community actions rely on the authenticated server registry, live resource authorization and the existing global write gate, not another manual social whitelist. Exact durable readback is obtained by `requestId`; an ambiguous POST cannot be reposted by guessing. The legacy typed ActionSender methods remain supported.

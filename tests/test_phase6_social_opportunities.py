@@ -56,7 +56,11 @@ class SocialTests(unittest.TestCase):
         self.assertFalse(report["model_invoked"])
         self.assertFalse(report["remote_action_issued"])
         self.assertFalse(report["host_woken"])
-        self.assertFalse(HostHandoff(self.db).prepare("hatch",1001)["should_wake"])
+        # Admission alone is local-only; actual host handoff must be
+        # requested separately, and it now includes idle social by default.
+        self.assertEqual(self.db.read(
+            "SELECT count(*) AS n FROM wakeup_requests")[0]["n"],0)
+        self.assertTrue(HostHandoff(self.db).prepare("hatch",1001)["should_wake"])
         self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox")[0]["n"],0)
         row=self.db.read("SELECT * FROM social_intents WHERE resource_id='post_alice'")[0]
         self.assertEqual(row["action"],"community.post.comment")
@@ -118,7 +122,7 @@ class SocialTests(unittest.TestCase):
             self.assertEqual(self.db.read("SELECT count(*) AS n FROM social_intents")[0]["n"],0)
             self.assertEqual(self.db.read("SELECT count(*) AS n FROM schedule_activities")[0]["n"],0)
 
-    def test_default_deny_executor_and_catalog_bound_social_scope(self):
+    def test_platform_granted_community_action_requires_existing_outbound_write_gate(self):
         fake=SimpleNamespace(request=lambda method,path: (
             Response(200,{"protocolVersion":"1","actorId":"muse",
                           "actions":[{"name":"community.post.comment",
@@ -130,15 +134,18 @@ class SocialTests(unittest.TestCase):
                   "resource":{"type":"post","id":"post_safe"},
                   "input":{"content":"Hello"},"requestId":"social-post-0001"}
         row={"action":"platform_action","actor":"muse","payload":envelope}
-        cfg=Config(allowed_platform_actions=["community.post.comment"])
+        # Read-only is the default. A separate community switch or local
+        # action-name list is no longer needed once outbound writes are
+        # authorized; the server's authenticated catalog and resource
+        # checks still govern execution.
+        cfg=Config()
         ok,_=can_execute(SimpleNamespace(config=cfg,client=fake),row)
         self.assertFalse(ok)
-        cfg=Config(allowed_platform_actions=["community.post.comment"],
-                   allow_community_actions=True)
+        cfg=Config(allow_writes=True)
         ok,reason=can_execute(SimpleNamespace(config=cfg,client=fake),row)
         self.assertTrue(ok,reason)
-        wrong=Config(allow_community_actions=True)
-        ok,_=can_execute(SimpleNamespace(config=wrong,client=fake),row)
+        wrong={**row,"payload":{**row["payload"],"action":"task.claim"}}
+        ok,_=can_execute(SimpleNamespace(config=cfg,client=fake),wrong)
         self.assertFalse(ok)
 
     def test_outbox_social_lease_accepts_exactly_one_registered_action(self):

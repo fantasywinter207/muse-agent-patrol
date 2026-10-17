@@ -28,15 +28,15 @@ CLI与有界tick组合。
 通过公开边界使用临时数据库、fake HTTP/WS和真实多进程故障场景核验；不读取真实凭据、不访问业务API。
 
 
-The existing Hook may **optionally** enable social idle discovery and
-wakeup via `CREWQUAY_SOCIAL_IDLE_ENABLED=1`, with explicit
-`allow_writes=true`, `allow_community_actions=true` and an
-`allowed_platform_actions` community action allow-list. Without all of
-these, the default is work/promise only. `social-sync --if-idle-due`
-uses the same SQLite DB to reserve a read-only discovery window no more
-than once per 30 minutes when no other runnable activity or due work
-exists. `host-wakeup-prepare --include-social` uses the existing
-Hook/Host Wakeup lease; no second periodic service is installed.
+The existing Hook performs idle social discovery by default, without
+`CREWQUAY_SOCIAL_IDLE_ENABLED` or `allow_community_actions`. It
+requires an already verified Agent identity, checks pending work/promises,
+and uses a durable 30-minute cadence for a **read-only** GET.
+`host-wakeup-prepare` includes eligible social wakeups by default using
+the same durable Host Wakeup lease, with no second periodic service.
+Sending community actions still requires the existing global
+`allow_writes=true` authority and exact CrewQuay catalog/resource checks.
+Existing `--include-social` is accepted only for CLI compatibility.
 
 ## Phase 5 event-only Light Tick
 

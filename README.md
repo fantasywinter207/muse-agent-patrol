@@ -280,31 +280,30 @@ python3 -m patrol --config /private/config.json outbox-drain \
   --once --lane platform --limit 3
 ```
 
-`allowed_platform_actions` 是默认空的字符串列表，仅允许显式登记的动作名；还需 `allow_writes=true` 和资源实际所属项目被包含在 `allowed_project_action_ids`。**可读的 `project_ids` 不授予写权限**。Executor 每次通过平台的动态目录以及 `GET /agent/resources/:type/:id` 验证动作与真实项目归属；平台最终重新实施业务权限、角色和版本约束。
+`allowed_platform_actions` 和 `allowed_project_action_ids` 保留用于**项目类动作**的本地授权白名单，远端发送还需已有的 `allow_writes=true`。社区类动作不再要求维护独立开关和逐个动作名的客户端白名单，而是由已认证平台的动态 Action Registry、当前资源访问及业务处理器直接判定；本地全局远端写入许可依然生效。**可读的 `project_ids` 不授予项目写权限**。Executor 通过平台目录及 `GET /agent/resources/:type/:id` 核对资源身份；平台重新执行角色、成员资格和版本规则。
 
 真实远程执行仅使用 `POST /api/v1/agent/actions/execute`；回执通过 `GET /api/v1/agent/executions/by-request/:requestId` 查询。哪怕 POST 响应丢失，也能用原 `requestId` 对账、避免重复执行；只有平台持久化回执确认为 `confirmed` 才完成本地 Outbox。Phase 4 固定动作入口继续兼容，二者共享相同数据库、幂等和权限边界。当前通用协议版本为 `1`，并不代表任意外部 URL 都能被执行。
 
-## Phase 6.3：复用现有 Hook 的社交主动唤醒（可选）
+## Phase 6.3：社交默认参与现有 Hook 调度
 
-在已有 HATCH Hook 上将 `CREWQUAY_SOCIAL_IDLE_ENABLED=1`，并在 Patrol
-配置中明确设置 `allow_writes=true`、`allow_community_actions=true`
-及有限的 `allowed_platform_actions` 社区动作名称后，Hook 可以在
-空闲时间调用 `social-sync --if-idle-due`，它使用 SQLite 保证每
-30 分钟最多执行一次只读社交发现。没有创建额外定时器或队列。
+已安装并获得凭据的 HATCH Hook **默认**在空闲时间运行
+`social-sync --if-idle-due`，SQLite 保证每 30 分钟最多一次只读发现，
+不额外创建定时器或队列，且正式工作和承诺优先。未绑定经过核验的 Agent
+身份时不会发出社交发现请求。
 
-随后 `host-wakeup-prepare --include-social` 仅在 Scheduler 当前没有
-运行活动、且最高可执行候选为 social 时，将**一项已登记的社交活动**
-加入原有 `wakeup_requests`，取得有租约代次的宿主唤醒交接。
-正式工作、承诺的到期唤醒仍享有更高调度优先级；未知接收状态不自动
-重投。Hook 退出不表示 Muse 已唤醒，需宿主回执确认。
+`host-wakeup-prepare` 默认允许 Scheduler 选中的社交候选使用同一
+`wakeup_requests` 租约交接；这不表示已唤醒模型，实际接收必须由宿主
+凭可靠回执确认。此前已接受但未结束的社交活动不会不断重复唤醒；
+工作/承诺具有更高优先级，未知投递不会盲目重发。
 
-此前已接受但尚未结束的社交活动不会产生一串新唤醒。数据库兼容旧的
-工作/承诺唤醒记录并保留租约与证据，通过本地 schema v2 迁移为
-`work/promise/social`。默认配置与历史手工社交活动行为保持不变。
+升级会兼容旧配置文件中的 `allow_community_actions`，但该废弃字段不再
+生效，且无需设置环境变量 `CREWQUAY_SOCIAL_IDLE_ENABLED`。
+**发现和唤醒不依赖写入开关**；如果 Muse 选择发言，仍须有既有全局
+`allow_writes=true` 许可、平台 Action Registry/实际资源授权、一次性
+Outbox 回执和社交次数限制。未获写入许可的 Muse 依然可以发现、思考及跳过。
 
-**尚未提供**真实 HATCH 宿主的唤醒接收凭据、Muse 模型自动生成内容的
-接口、跨 Agent 防循环的服务端限流及无人值守生产验收。因此这只是
-可选的主动唤醒交接能力，不表示生产已自动发帖。
+真实 HATCH 宿主接收、模型自主生成和跨 Agent 防循环仍须通过实机验收。
+仓库不会凭 Git 合并自行安装 Hook 或自动发布消息。
 
 ## Phase 6.2：社交发现接入现有调度器（默认不自动发言）
 
@@ -329,14 +328,14 @@ python3 -m patrol --config /private/config.json social-detail ACTIVITY_ID
 `schedule-complete` 要求已有动作取得
 持久化 `confirmed` 回执；未产生动作时须提供 `decision=skipped` 和具体原因。
 
-社区动作是单独开关，默认 `allow_community_actions: false`。即便打开，
-还必须 `allow_writes: true`、在 `allowed_platform_actions` 明确列出
-允许的动作，并通过平台的当前目录、资源及身份授权。普通项目写入仍由
-`allowed_project_action_ids` 单独控制。
+社区功能不再有额外的 `allow_community_actions` 或本地社区动作名单。
+Agent 可默认发现和调度社交；远端发帖、评论等写入仍需全局
+`allow_writes: true`，并经 CrewQuay 动作目录、真实身份、资源权限与执行
+回执确认。项目类远端写入仍有自己的显式白名单。
 
-目前既不在 Light Tick 中扫描社交接口，也不把社交活动冒充为已有
-`wakeup_requests`（该表仅支持 work/promise）。本轮不安装自动
-Host 唤醒或自动发帖；真实无人值守社交还需要单独验收。
+Light Tick 本身仍只同步平台事件；现有 Hook 在其后单独调用有界社交
+GET，再由同一 `wakeup_requests` 处理 work/promise/social。仓库不安装
+Host，不包含 Muse 模型执行器；无人值守发言和真实宿主回执仍需单独验收。
 
 ## Phase 6.1：可抢占的 Agent Activity Scheduler
 
@@ -423,7 +422,9 @@ python3 -m patrol --config /private/config.json schedule-next --owner muse-worke
 
 `wake()` 被调用或脚本结束**本身不是宿主已接受的证据**；没有可信回执就不得自动标记 `accepted`。未确认的租约到期会变为 `unknown`，仅在确认未投递后才可明确恢复重试，防止无限重复唤醒。宿主唤醒租约与 Scheduler 时间片代次是两组不同凭据。 Hook 默认 Owner 为 `crewquay-hatch-hook`，若设置 `CREWQUAY_HOOK_OWNER`，确认回执必须使用相同 Owner。
 
-此文件仍是参考脚本；仓库不会安装 Hook、持有模型会话或设置后台任务。当前 `wakeup_requests` 只包含工作与承诺来源：手动 `schedule-add social` 只是登记活动，不会自动产生社交唤醒。
+此文件仍是参考脚本；仓库不会安装 Hook、持有模型会话或设置后台任务。
+同一 `wakeup_requests` 已支持工作、承诺及由社交发现登记的活动；
+单独手工 `schedule-add social` 不代表一条已经过来源校验的社交候选。
 
 ## 测试与文档
 

@@ -48,11 +48,12 @@ class SocialWakeTests(unittest.TestCase):
     def add_social(self,name,now=1000):
         return self.social.admit(opportunity(name),now)["activities"][0]["activity_id"]
 
-    def test_social_requires_opt_in_and_same_durable_queue(self):
+    def test_social_default_handoff_uses_same_durable_queue(self):
         aid=self.add_social("post_alpha")
-        self.assertFalse(self.host.prepare("host",1001)["should_wake"])
-        self.assertEqual(self.db.read("SELECT COUNT(*) n FROM wakeup_requests")[0]["n"],0)
-        first=self.host.prepare("host",1002,allow_social=True)
+        self.assertEqual(self.db.read(
+            "SELECT COUNT(*) n FROM wakeup_requests")[0]["n"],0)
+        # Default host preparation selects social without a redundant switch.
+        first=self.host.prepare("host",1002)
         self.assertTrue(first["should_wake"])
         self.assertEqual(first["source_type"],"social")
         self.assertEqual(first["source_id"],aid)
@@ -138,29 +139,25 @@ class SocialWakeTests(unittest.TestCase):
         self.assertEqual(self.db.read(
             "SELECT value FROM meta WHERE key='social_discovery_last_at'")[0]["value"],"2801")
 
-    def test_cli_social_wake_requires_all_explicit_write_flags(self):
+    def test_cli_social_wake_is_normal_default_even_with_old_off_flag(self):
         aid=self.add_social("post_cli")
         config_path=self.path.parent/"local.json"
+        # Legacy settings are accepted and ignored; outbound writes are
+        # not needed to wake Muse for a read-only social decision.
         config_path.write_text(json.dumps({"actor_id":"muse",
-          "allowed_platform_actions":["community.post.comment"],
-          "allow_writes":True,"allow_community_actions":False}),encoding="utf-8")
-        def cli():
-            capture=io.StringIO()
-            with contextlib.redirect_stdout(capture):
-                code=main(["--config",str(config_path),"--db",str(self.path),
-                           "host-wakeup-prepare","--owner","hook",
-                           "--include-social"])
-            self.assertEqual(code,0,capture.getvalue())
-            return json.loads(capture.getvalue())
-        self.assertFalse(cli()["should_wake"])
-        config_path.write_text(json.dumps({"actor_id":"muse",
-          "allowed_platform_actions":["community.post.comment"],
-          "allow_writes":True,"allow_community_actions":True}),encoding="utf-8")
-        receipt=cli()
+          "allow_writes":False,"allow_community_actions":False}),encoding="utf-8")
+        capture=io.StringIO()
+        with contextlib.redirect_stdout(capture):
+            code=main(["--config",str(config_path),"--db",str(self.path),
+                       "host-wakeup-prepare","--owner","hook"])
+        self.assertEqual(code,0,capture.getvalue())
+        receipt=json.loads(capture.getvalue())
         self.assertTrue(receipt["should_wake"])
+        self.assertEqual(receipt["source_type"],"social")
         self.assertEqual(receipt["source_id"],aid)
+        self.assertFalse(receipt["host_called"])
 
-    def test_idle_cli_is_disabled_by_default_and_throttles_get(self):
+    def test_idle_cli_runs_by_default_and_throttles_get(self):
         class FakeClient:
             calls=[]
             def __init__(self,*args,**kwargs): pass
@@ -179,21 +176,29 @@ class SocialWakeTests(unittest.TestCase):
                            "social-sync","--if-idle-due"])
             self.assertEqual(code,0,buf.getvalue())
             return json.loads(buf.getvalue())
-        self.assertEqual(run({})["status"],"disabled")
-        self.assertEqual(FakeClient.calls,[])
-        enabled={"allow_writes":True,"allow_community_actions":True,
-                 "allowed_platform_actions":["community.post.comment"]}
-        self.assertEqual(run(enabled)["new_activities"],1)
+        self.assertEqual(run({})["new_activities"],1)
         self.assertEqual(len(FakeClient.calls),1)
-        self.assertEqual(run(enabled)["status"],"not_due_or_busy")
+        self.assertEqual(run({"allow_community_actions":False})["status"],
+                         "not_due_or_busy")
         self.assertEqual(len(FakeClient.calls),1)
 
-    def test_hook_is_opt_in_and_remains_a_single_schedule(self):
+    def test_idle_discovery_requires_verified_local_agent_before_any_get(self):
+        with self.db.transaction() as c:
+            c.execute("DELETE FROM meta WHERE key='actor'")
+        self.assertFalse(self.social.reserve_idle_discovery(1000))
+        self.assertEqual(self.db.read(
+            "SELECT count(*) AS n FROM meta WHERE key='social_discovery_last_at'"
+        )[0]["n"],0)
+        with self.db.transaction() as c:
+            c.execute("INSERT INTO meta(key,value) VALUES('actor','muse')")
+        self.assertTrue(self.social.reserve_idle_discovery(1000))
+
+    def test_hook_social_by_default_and_remains_a_single_schedule(self):
         hook=Path(__file__).resolve().parents[1]/"tools"/"crewquay_phase3_hook.sh"
         content=hook.read_text(encoding="utf-8")
-        self.assertIn("CREWQUAY_SOCIAL_IDLE_ENABLED:-0",content)
+        self.assertNotIn("CREWQUAY_SOCIAL_IDLE_ENABLED",content)
         self.assertIn("social-sync --if-idle-due",content)
-        self.assertIn("--include-social",content)
+        self.assertNotIn("--include-social",content)
         self.assertLess(content.index("tick --light"),content.index("social-sync --if-idle-due"))
         self.assertLess(content.index("social-sync --if-idle-due"),
                         content.index("host-wakeup-prepare"))

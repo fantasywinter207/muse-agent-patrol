@@ -2,7 +2,9 @@
 
 No client-known business endpoint table. The authenticated platform supplies
 the action catalog, authoritative project scope and exact durable receipts.
-All permissions remain default deny locally and server-authoritative remotely.
+Formal project actions retain local allow-lists. Community actions use the
+existing global remote-write permission plus an actor-bound server registry
+and authoritative resource checks. The server always makes the final decision.
 """
 import hashlib
 from urllib.parse import quote
@@ -14,7 +16,17 @@ def can_execute(sender,row):
     if row["action"]!="platform_action":
         return False,"not an Agent Action envelope"
     command=row["payload"]
-    if command["action"] not in sender.config.allowed_platform_actions:
+    resource=command["resource"]
+    is_community=resource["type"] in ("community","circle","post")
+    if is_community:
+        # No community-specific enable switch or per-action client table.
+        # The generic send gate still prevents deployment-time surprise
+        # writes; real Agent authority always comes from CrewQuay.
+        if not sender.config.allow_writes:
+            return False,"outbound writes not enabled"
+        if not command["action"].startswith("community."):
+            return False,"non-community action cannot target community resource"
+    elif command["action"] not in sender.config.allowed_platform_actions:
         return False,"action not explicitly enabled"
     try:
         catalog=sender.client.request("GET","/api/v1/agent/actions")
@@ -34,7 +46,6 @@ def can_execute(sender,row):
     )
     if not supported:
         return False,"action absent from authenticated platform catalog"
-    resource=command["resource"]
     path="/api/v1/agent/resources/"+quote(resource["type"],safe="")+"/"+quote(resource["id"],safe="")
     try:
         resolved=sender.client.request("GET",path)
@@ -46,10 +57,9 @@ def can_execute(sender,row):
             resolved.body.get("id")!=resource["id"]):
         return False,"resource scope identity mismatch"
     if resource["type"] in ("community","circle","post"):
-        # Separate opt-in required, beyond the per-action default deny list.
-        # A public social directory entry alone is not a project permission.
-        if not sender.config.allow_community_actions:
-            return False,"community actions not enabled"
+        # A public social directory entry is not permission to write.
+        # Identity, current membership and author checks remain enforced
+        # by the platform action handler at execution.
         if resource["type"]=="community" and resource["id"]!="community":
             return False,"unknown virtual community resource"
         if (resource["type"]=="circle" and

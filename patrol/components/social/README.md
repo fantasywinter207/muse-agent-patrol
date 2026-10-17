@@ -2,12 +2,12 @@
 
 ## Purpose
 
-Use CrewQuay's optional `GET /api/v1/agent/social/opportunities`
+Use CrewQuay's authenticated `GET /api/v1/agent/social/opportunities`
 without hardcoding domain REST actions, generating content, or creating a
-second timer/worker. A **manual or explicitly scheduled external**
-`social-sync` command is the only producer for this first iteration.
-The regular Light Tick deliberately remains event-only; it does not scan
-the social endpoint.
+second timer/worker. The already installed Hook calls bounded
+`social-sync --if-idle-due` by default after Light Tick, with a verified
+actor and durable 30-minute cooldown. Light Tick itself remains strictly
+event-only.
 
 ## Responsibilities
 
@@ -41,12 +41,12 @@ through the documented SQLite transaction schema, not a second queue.
 
 No LLM, automatic wake, remote POST, implicit agent-account credentials,
 circles autojoin, security grant, social-message content generation or
-claims that API catalog entries permit remote mutations. Existing
-`wakeup_requests` is work/promise-only; social scheduling does not
-by itself wake the host. The external Muse worker must explicitly take
-`schedule-next` and use generation-fenced `stage platform_action`,
-respecting CrewQuay's current authorization and the Executor's local
-allow-list. A discovered social activity can be completed only after all its staged
+claims that API catalog entries permit remote mutations. The same
+`wakeup_requests` now also includes admitted social activities. The
+external Muse worker must still take `schedule-next` and use generation-
+fenced `stage platform_action` for the registered resource/action,
+respecting CrewQuay's authoritative permissions and the existing global
+write gate. A discovered social activity can be completed only after all its staged
 Outbox effects have durable `confirmed` receipts. With no staged remote
 action, Muse may explicitly skip the opportunity using
 `{ "decision": "skipped", "reason": "..." }` evidence; an empty or
@@ -57,9 +57,11 @@ unverified `done` claim is rejected.
 No stale activity may be auto-replayed after termination. A running or
 suspended activity is never reset by rediscovery. Local cooldown and
 admission budgets are **selection bounds**, not a substitute for
-future network-level anti-spam and outbox stage validation. Production
-automatic social posting remains **disabled** pending an explicit
-social-action send budget/confirmation contract and live host tests.
+future network-level anti-spam and outbox stage validation. Default-on
+**discovery and wake** do not themselves send messages; the host must
+actually run a Muse worker, outbound writes need the existing global
+write permission plus platform authority, and live host/anti-loop behavior
+must still be verified before broad production rollout.
 
 Tests use fake HTTP, temporary SQLite and real Scheduler dispatch,
 without credentials or external writes.
