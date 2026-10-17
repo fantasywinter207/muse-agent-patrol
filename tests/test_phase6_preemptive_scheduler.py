@@ -10,6 +10,7 @@ from patrol.components.queue.index import Queue
 from patrol.components.config.index import Config
 from patrol.components.runtime.index import Tick
 from patrol.components.wakeup.index import Wakeups
+from patrol.components.promises.index import Promises
 from patrol.components.scheduling.policy.scoring import priority, preemption
 
 
@@ -521,6 +522,37 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         self.scheduler.checkpoint(task,"muse",running["lease_version"],1003,
                                   {"legacy_step":"still valid"})
         self.assertEqual(self.scheduler.restore(task,1004)["checkpoint_format"],"legacy")
+
+
+    def test_due_nonhuman_promise_is_runnable_and_requires_progress(self):
+        pid=Promises(self.db).create("muse","owner","source:promise-nonhuman",
+            "deliver verifiable result",1000,1001,1002,due_at=1300,kind="complex")
+        self.assertEqual(self.scheduler.sync_work(1000),1)
+        self.assertEqual(self.scheduler.sync_work(1000),0)
+        self.assertEqual(Wakeups(self.db).stage(1000,threshold=70),1)
+        wake=Wakeups(self.db).claim_next("hatch",1000)
+        self.assertEqual(wake["source_type"],"promise")
+        Wakeups(self.db).acknowledge(wake["id"],"hatch",wake["lease_version"],
+                                     1001,"accepted",{"host":"verified"})
+        running=self.scheduler.dispatch("muse",1002)["activity"]
+        self.assertEqual(running["kind"],"promise")
+        with self.assertRaises(ValueError):
+            self.scheduler.complete(running["id"],"muse",running["lease_version"],
+                                     1003,{"claimed":"no real progress"})
+        Wakeups(self.db).record_execution(wake["id"],wake["lease_version"],
+            running["id"],running["lease_version"],"muse","started",1003,
+            {"session":"actual"})
+        Promises(self.db).progress(pid,1004,{"artifact":"first concrete step"},1150)
+        self.scheduler.complete(running["id"],"muse",running["lease_version"],
+                                1005,{"recorded_progress":"promise"})
+        Wakeups(self.db).record_execution(wake["id"],wake["lease_version"],
+            running["id"],running["lease_version"],"muse","finished",1006,
+            {"progress":"verified"})
+        self.assertEqual(self.scheduler.sync_work(1006),0)
+        self.assertEqual(self.scheduler.sync_work(1050),1)
+        candidate=self.scheduler.assess(1050)["candidate"]
+        self.assertEqual(candidate["kind"],"promise")
+        self.assertNotEqual(candidate["id"],running["id"])
 
 
 if __name__=="__main__":
