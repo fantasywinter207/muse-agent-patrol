@@ -17,7 +17,7 @@
 5. 等待宿主**自然**触发 3–5 次，核对 HATCH 任务真实计划间隔、日志开始时间、`patrol_runs` 新记录、游标变化、错误和锁冲突。仅手动跑 `tick` 生成数据库记录不满足自动运行。
 6. 真正的 `wake()` 及可核验接收回执/ `wakeup-ack` 已接线后，才可开启 `CREWQUAY_HOST_WAKEUP_WIRED=1`，并在合法测试消息上做端到端闭环验证。没有宿主回执则记录 `poll_only`/唤醒未验收，不能假造 accepted。
 
-**验收分开报：** `HOOK_REGISTERED`（确已注册启用）→ `HOOK_TICK_PASS`（自然 60 秒触发）→ `WAKE_BRIDGE_PASS`（真实 wake/ack）→ `MUSE_ACTION_PASS`（Muse 真正执行且需要写入时平台确认）。任何缺口必须明确具体阻塞，不能报告“已自动接入”。如果本 Agent 无宿主原生安装能力/权限，报告 `BLOCKED_HOST_HOOK` 与需要宿主操作者提供的最小能力，再继续其他已授权工作；不替代为一条新的外部 cron。
+**验收分开报：** `HOOK_REGISTERED`（确已注册启用）→ `HOOK_TICK_PASS`（自然 60 秒触发）→ `WAKE_BRIDGE_PASS`（真实 wake/ack）→ `MUSE_ACTION_PASS`（Muse 真正执行且需要写入时平台确认）→ **`DEPLOYMENT_VERIFIED`（Agent ↔ CrewQuay 完成独立 SYN / SYN-ACK / ACK 三次应用层握手，平台记录最终 ACK）**。最后一步是强制门槛；无法完成时必须 [提交部署 Bug](DEPLOYMENT_HANDSHAKE.md)，不能报告“已自动接入”。如果本 Agent 无宿主原生安装能力/权限，报告 `BLOCKED_HOST_HOOK` 与需要宿主操作者提供的最小能力，再继续其他已授权工作；不替代为一条新的外部 cron。
 
 ## 已有 Hook：先只读检查，后变更
 
@@ -57,3 +57,7 @@
 - 若出现并行入口或重复回复，优先在**已确认的多余入口**停止新触发并保存证据；不删除生产 SQLite、不重放未确认 Outbox、不恢复旧 watcher/独立 Executor。
 
 更多操作细节见根 [README](../README.md) 与 [Host Handoff 契约](../patrol/components/host/README.md)。
+
+## 平台端到端部署验证（强制）
+
+不允许在只收到一次 `confirmed` 消息、或只看到本地 Hook 日志后宣布安装结束。**见 [部署三次握手协议](DEPLOYMENT_HANDSHAKE.md)**：Agent 发送一次 SYN；平台独立应答 SYN-ACK 并由真实 Hook 自动捕获；Agent 回 ACK，平台独立确认收到最终 ACK。每轮采用随机 runId/nonce/challenge 与持久化消息 ID/事件游标对账。无平台独立应答能力、超时、权限或唤醒异常必须通过真实 `POST /api/v1/bugs` 报 Bug；发 Bug 本身失败则保留证据并通过获准运维通道反馈。**未完成三次握手的状态只能是 `DEPLOYMENT_BLOCKED/FAILED`，不能写部署成功。**

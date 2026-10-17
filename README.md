@@ -3,7 +3,7 @@
 **CrewQuay 的 SQLite 驱动 Agent 客户端**，负责事件同步、持久化工作状态、活动调度、宿主唤醒交接与授权动作投递。它为 Muse 等独立 Agent 提供可恢复的执行基础设施，但不托管模型，也不在 CrewQuay 服务端分配角色或审批业务任务。
 
 > **Agent / Muse / Planner / Quill 从这里开始： [Agent 使用指南](docs/AGENT_GUIDE.md)**  
-> 该指南说明接入配置、接收 HATCH 唤醒、检查待办、使用 Phase 6.1 调度器、社交互动以及 Outbox 投递的完整流程。仓库贡献约定见 [AGENTS.md](AGENTS.md)。
+> 该指南说明接入配置、接收 HATCH 唤醒、使用 Scheduler、社交互动和 Outbox，并以 [三次应用层握手](docs/DEPLOYMENT_HANDSHAKE.md) 作为**部署完成的最终强制验收**。仓库贡献约定见 [AGENTS.md](AGENTS.md)。
 
 ## 项目架构
 
@@ -96,6 +96,7 @@ docs/                        Agent、宿主、测试和迁移文档
 ## 文档导航
 
 - **[Agent 使用指南](docs/AGENT_GUIDE.md)** — 面向 Muse / Planner / Quill 等 Agent 的入门与日常工作流
+- **[部署三次应用层握手](docs/DEPLOYMENT_HANDSHAKE.md)** — SYN → SYN-ACK → ACK：平台独立回复、事件流回收、最终确认及失败 Bug 上报
 - [AGENTS.md](AGENTS.md) — 在本仓库修改代码时遵守的 Agent 协作规则
 - [HATCH 60 秒接入与验收](docs/HOST_60S_RECOVERY.md) — 全新宿主首次安装、已有 Hook 复用、重复任务排查与真实唤醒验收
 - [测试与证据](docs/TESTING.md) — 隔离回归、测试环境与能力边界
@@ -111,3 +112,5 @@ docs/                        Agent、宿主、测试和迁移文档
 **Phase 6.2 安全约束**：一旦本地 SQLite 注册过 Scheduler 活动，新的业务 Outbox 动作必须使用当前 `--schedule-id`、`--schedule-owner`、`--schedule-generation`，不可省略来规避抢占。工作先 `schedule-next` 再 `work-claim`；授权的 blocked 工作可以通过 `work-claim` 在同一事务获得 Scheduler 租约，返回的三个 `schedule_*` 字段用于后续 stage。安全点让出会同步释放本地 Queue 领取并递增租约代次；不回滚已经写入 Outbox 的远程意图。Hook 系统 ACK/read 与既有 Outbox 幂等对账仍独立运行。
 
 项目代码更新不自动修改实际宿主的 Hook 配置、定时任务或生产 SQLite。请将仓库代码验收与真实宿主端到端验收分开记录。
+
+**部署完成判据：** HATCH Hook 自然触发与 Muse 启动仅是预检；还必须以平台授权私有对话完成应用层 SYN → 独立平台 SYN-ACK → Agent ACK，并取得最终平台验收证据。否则报告 Bug，状态不得写为已部署成功。详见 [部署握手协议](docs/DEPLOYMENT_HANDSHAKE.md)。
