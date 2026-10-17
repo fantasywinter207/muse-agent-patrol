@@ -347,14 +347,29 @@ Outbox 保留逻辑键和 `idem_key`，发送方使用租约/版本防止旧执�
 
 ## Hook 参考实现
 
-[tools/crewquay_phase3_hook.sh](tools/crewquay_phase3_hook.sh) 提供一个示例组合：
+[tools/crewquay_phase3_hook.sh](tools/crewquay_phase3_hook.sh) 复用已有 HATCH Hook 入口：
 
-1. 执行有界 `tick --light`；
-2. 执行一次 `outbox-drain --once --lane chat`；
-3. 查询 SQLite 中到期 `wakeup_requests`；
-4. 返回宿主的 `wake` 或 `silent`。
+1. 执行有界 `tick --light`，同步平台事件、本地工作与调度候选；
+2. 运行一次 `outbox-drain --once --lane any`，补偿所有已获授权且到期的 Outbox 动作；
+3. 执行 `host-wakeup-prepare --owner HOST_HOOK`：原子领取一条有效、到期的 `wakeup_requests`，返回请求 ID、租约代次与 Scheduler 建议；
+4. 获得真实 `reserved` 结果才向外部宿主调用 `wake`，其余情况 `silent`。
 
-此文件是参考脚本；仓库没有内置 Muse 宿主或 Hook 调度安装器。Hooks 与 Executor 可共享同一 SQLite 状态及现有 CLI 文件锁。
+```sh
+# 仅创建宿主唤醒租约，不执行 Muse 推理、也不占有调度时间片
+python3 -m patrol --config /private/config.json host-wakeup-prepare --owner crewquay-hatch-hook
+
+# 宿主确实收到并可核验接受时，使用已有的回执入口
+python3 -m patrol --config /private/config.json wakeup-ack WAKEUP_ID \
+  --owner crewquay-hatch-hook --lease-version WAKEUP_GENERATION \
+  --result accepted --evidence /private/host-receipt.json
+
+# 真正的 Muse Worker 再领取与执行独立活动
+python3 -m patrol --config /private/config.json schedule-next --owner muse-worker
+```
+
+`wake()` 被调用或脚本结束**本身不是宿主已接受的证据**；没有可信回执就不得自动标记 `accepted`。未确认的租约到期会变为 `unknown`，仅在确认未投递后才可明确恢复重试，防止无限重复唤醒。宿主唤醒租约与 Scheduler 时间片代次是两组不同凭据。 Hook 默认 Owner 为 `crewquay-hatch-hook`，若设置 `CREWQUAY_HOOK_OWNER`，确认回执必须使用相同 Owner。
+
+此文件仍是参考脚本；仓库不会安装 Hook、持有模型会话或设置后台任务。当前 `wakeup_requests` 只包含工作与承诺来源：手动 `schedule-add social` 只是登记活动，不会自动产生社交唤醒。
 
 ## 测试与文档
 

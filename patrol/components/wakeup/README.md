@@ -4,7 +4,7 @@
 Use the existing SQLite as the sole durable source of wakeup intent, with strict idempotency and lease fencing.
 
 ## Responsibilities
-Stage high-priority human_action and due promise intents, export a read-only feed, safely claim host dispatch attempts and record confirmed delivery/failure/unknown results.
+Stage high-priority human_action and due promise intents, export a read-only feed, atomically claim the next due host dispatch attempt (claim_next), and record confirmed delivery/failure/unknown results.
 
 ## Non-responsibilities
 This package does not implement a Muse host Hook, a Cron installer, model execution, CrewQuay writes, permission grants or task completion. Acknowledging host acceptance is not proof that Muse actually worked.
