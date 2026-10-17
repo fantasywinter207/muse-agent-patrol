@@ -81,7 +81,7 @@ class Deployment:
             {"reason":"report failed CrewQuay deployment handshake",
              "deployment_run_id":row["id"],"failure_code":code},
             now,priority=95,start_by=now+180)
-        c.execute("""UPDATE deployment_runs SET bug_work_id=?,state='failed',
+        c.execute("""UPDATE deployment_runs SET bug_work_id=?,
             failure_code=?,updated_at=? WHERE id=?""",(wid,code,now,row["id"]))
         return wid
 
@@ -263,7 +263,8 @@ class Deployment:
                 if (row["expires_at"] is not None and now>=row["expires_at"] and
                     row["state"] not in ("protocol_verified","failed","expired")):
                     self._bug_work(c,row,now,"FINAL_ACK_NOT_VERIFIED")
-                    updated.append({"id":row["id"],"phase":"expired_report_required"})
+                    c.execute("UPDATE deployment_runs SET state='expired' WHERE id=?", (row["id"],))
+                    updated.append({"id":row["id"],"phase":"expired"})
             # A confirmed exact Bug receipt is a separate durable fact.
             reports=c.execute("""SELECT id,bug_outbox_id FROM deployment_runs
                 WHERE actor=? AND bug_outbox_id IS NOT NULL AND bug_id IS NULL""",
