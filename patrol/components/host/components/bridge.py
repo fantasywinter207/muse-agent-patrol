@@ -27,9 +27,12 @@ class HostHandoff:
         social_eligible=bool(
             allow_social and decision["running"] is None and
             decision["candidate"] and decision["candidate"]["kind"]=="social")
-        if social_eligible:
-            self.wakeups.stage_social(now)
-        leased=self.wakeups.claim_next(owner,now,allow_social=social_eligible)
+        social_id=decision["candidate"]["id"] if social_eligible else None
+        if social_id:
+            self.wakeups.stage_social(now,social_id)
+        leased=self.wakeups.claim_next(
+            owner,now,allow_social=social_eligible,
+            social_activity_id=social_id)
         if leased is None:
             return {"should_wake":False,"host_called":False,
                     "status":"idle","activity_dispatched":False,
