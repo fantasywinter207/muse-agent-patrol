@@ -130,6 +130,41 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox")[0]["n"],1)
         self.assertTrue(oid)
 
+    def test_issue31_orphaned_queue_lease_recovered_only_after_real_expiry(self):
+        wid=Queue(self.db).enqueue("work:orphan","human_action",
+                                   {"reason":"legacy inconsistent state"},1000,priority=85)
+        current=self.scheduler.dispatch("worker-old",1000)["activity"]
+        queue_old=Queue(self.db).claim_specific(wid,"worker-old",1001,
+                                                {"approved_by":"Owner"})
+        # Reproduce a damaged/old handoff: Scheduler suspended while the
+        # underlying Queue row still claims a worker. Do not assume this
+        # partial state can be created by the current atomic checkpoint.
+        with self.db.transaction() as c:
+            c.execute("""UPDATE schedule_activities SET status='suspended',
+                lease_owner=NULL,lease_until=NULL,slice_until=NULL
+                WHERE id=?""",(current["id"],))
+        premature=self.scheduler.dispatch("worker-new",1100,for_work_id=wid)
+        self.assertFalse(premature["granted"],premature)
+        self.assertEqual(premature["lease_recovered"],0)
+        self.assertEqual(premature["hint_status"],"work_running")
+        still=self.db.read("SELECT status,lease_version FROM work_items WHERE id=?",
+                           (wid,))[0]
+        self.assertEqual(still["status"],"running")
+        self.assertEqual(still["lease_version"],queue_old["lease_version"])
+        recovered=self.scheduler.dispatch("worker-new",1121,for_work_id=wid)
+        self.assertTrue(recovered["granted"],recovered)
+        self.assertEqual(recovered["lease_recovered"],1)
+        self.assertEqual(recovered["activity"]["work_id"],wid)
+        new_claim=Queue(self.db).claim_specific(wid,"worker-new",1122,
+                                               {"approved_by":"Owner"})
+        self.assertGreater(new_claim["lease_version"],queue_old["lease_version"])
+        with self.assertRaises(StaleLease):
+            Outbox(self.db).stage("orphan-old-writer","muse","send","owner",
+                {"content":"old"},1123,schedule_context={
+                    "id":current["id"],"owner":"worker-old",
+                    "generation":current["lease_version"]})
+        self.assertEqual(self.db.read("SELECT count(*) AS n FROM outbox")[0]["n"],0)
+
     def test_issue31_operator_hint_does_not_override_ineligible_or_higher_work(self):
         low=Queue(self.db).enqueue("work:hint-low","human_action",
                                     {"reason":"lower priority"},1000,priority=45)
