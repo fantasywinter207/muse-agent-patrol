@@ -86,10 +86,17 @@ class Scheduler:
                        switch_cost,now,now,now))
             return ident
 
-    def sync_work(self,now,limit=100):
-        """Idempotently reflect local human-decision work; no model or claim."""
+    def sync_work(self,now,limit=100,focus_work_id=None):
+        """Idempotently reflect local human-decision work; no model or claim.
+
+        A bounded sync always includes a specifically requested work item
+        before older backlog, without reserving it or changing its priority.
+        """
         if type(limit) is not int or not 1<=limit<=500:
             raise ValueError("sync limit must be 1..500")
+        if focus_work_id is not None and (
+                not isinstance(focus_work_id,str) or not 1<=len(focus_work_id)<=128):
+            raise ValueError("bounded local work ID required")
         added=0
         with self.db.transaction() as c:
             rows=c.execute("""SELECT w.id,w.priority,w.created_at,w.start_by,w.due_at,
@@ -102,13 +109,14 @@ class Scheduler:
                          LEFT JOIN schedule_activities a ON a.work_id=w.id
                          WHERE w.type='human_action' AND w.status IN
                            ('pending','retry_wait','blocked','needs_approval')
-                         ORDER BY CASE WHEN a.id IS NULL THEN 0 ELSE 1 END,
+                         ORDER BY CASE WHEN w.id=? THEN -1 ELSE 0 END,
+                             CASE WHEN a.id IS NULL THEN 0 ELSE 1 END,
                              CASE WHEN e.source='messages' AND
                                    COALESCE(ms.muse_score,ms.base_score) IS NOT NULL
                                   THEN COALESCE(ms.muse_score,ms.base_score)
                                   ELSE w.priority END DESC,
                              COALESCE(a.last_updated,w.created_at),w.created_at
-                         LIMIT ?""",(limit,)).fetchall()
+                         LIMIT ?""",(focus_work_id or "",limit)).fetchall()
             for row in rows:
                 key="work:"+row["id"]
                 score=(row["message_score"] if row["event_source"]=="messages"
@@ -284,7 +292,7 @@ class Scheduler:
         # tick --light and real Host wakeup are separate processes. Do not
         # assume the latest human_action has already been imported into the
         # Scheduler when a just-awakened worker calls schedule-next.
-        refreshed=self.sync_work(now,limit=500)
+        refreshed=self.sync_work(now,limit=500,focus_work_id=for_work_id)
         with self.db.transaction() as c:
             expired=self._recover(c,now)
             view=self._assess_tx(c,now,True)
