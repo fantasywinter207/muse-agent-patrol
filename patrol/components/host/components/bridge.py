@@ -12,7 +12,7 @@ class HostHandoff:
         self.scheduler=Scheduler(db,lease_seconds)
         self.wakeups=Wakeups(db,lease_seconds)
 
-    def prepare(self, owner, now):
+    def prepare(self, owner, now, allow_social=False):
         """Reserve one due intent and provide bounded, non-content routing hints.
 
         The Hook invokes wake() only after a successful reservation. Its host
@@ -21,7 +21,15 @@ class HostHandoff:
         The Muse worker, not the Hook, owns schedule-next and model execution.
         """
         decision=self.scheduler.reconcile(now)["decision"]
-        leased=self.wakeups.claim_next(owner,now)
+        # Idle social is opt-in only. The same Hook and wakeup table handle
+        # it, but never wake for social while another activity is running
+        # or an eligible higher-value formal task is the best candidate.
+        social_eligible=bool(
+            allow_social and decision["running"] is None and
+            decision["candidate"] and decision["candidate"]["kind"]=="social")
+        if social_eligible:
+            self.wakeups.stage_social(now)
+        leased=self.wakeups.claim_next(owner,now,allow_social=social_eligible)
         if leased is None:
             return {"should_wake":False,"host_called":False,
                     "status":"idle","activity_dispatched":False,
