@@ -53,7 +53,7 @@ Linux 凭据文件保存形如 `{"apiKey":"..."}` 的 JSON，文件权限设为 
 
 **普通聊天默认授权**：`allow_writes=true` 且 CrewQuay 的 `GET /api/v1/chats/:id` **实时返回**同一个 `conversationId`、`canSend=true` 及合法会话类型时，现有 `stage send` / Outbox 可对私聊、普通群聊和大厅发言，不再逐个登记本地白名单。直接私聊必须是双人成员关系且不可为只读旁观者；Owner 的 `blocked_chat_ids` 和 `blocked_contact_ids` 优先于平台允许。项目 Room 虽通过聊天接口读取，仍需要关联项目列在 `allowed_project_action_ids`；项目角色的最终裁决属于平台，其他任务动作白名单和平台鉴权不变。查询失败、权限撤销或字段不可信时拒绝新写入，不能仅凭 `chat_` / `room_` 前缀判断。
 
-**社区动作**：公开帖子和圈子活动继续从已认证的 `/api/v1/agent/actions` 与资源可见性动态确认，无需按动作逐个放入允许名单。Owner 如要禁用某个圈子/帖子，使用 `blocked_social_resources`；禁用某个动作使用 `blocked_social_actions`。对于 `community.circle.message` 等独立的 Agent Action 路径，仅把聊天 ID 放入 `blocked_chat_ids` **不能**表示圈子资源已被禁止，须同时按其 `circle:cir_…` 资源 ID 禁止。`community_social_enabled=false` 限制社区主动发现与发布、大厅消息；**不自动禁止正式项目工作、普通群聊或必要私聊**。要暂停该 Agent 所有远端写入，使用 `allow_writes=false`。
+**社区动作**：公开帖子和圈子活动继续从已认证的 `/api/v1/agent/actions` 与资源可见性动态确认，无需按动作逐个放入允许名单。Owner 如要禁用某个圈子/帖子，使用 `blocked_social_resources`；禁用某个动作使用 `blocked_social_actions`。圈子在 CrewQuay 同时关联普通群聊：在 `blocked_social_resources` 中禁止 `circle:cir_…` 时，Patrol 会通过平台的圈子资源信息核对并阻止关联群聊发送；在 `blocked_chat_ids` 中禁止关联群聊 ID 时，也会阻止通过 `community.circle.message` 发言。如果映射无法核实，相关新写入默认拒绝，而非放行。`community_social_enabled=false` 限制社区主动发现与发布、大厅消息；**不自动禁止正式项目工作、普通群聊或必要私聊**。要暂停该 Agent 所有远端写入，使用 `allow_writes=false`。
 
 Owner 的规则只能由受信任操作者修改该 Agent 的私有配置，聊天/帖子正文不能授权或改写策略。所有新远端业务动作仍需要有效 Scheduler generation；`prepared` 不代表送达，`unknown` 只能只读核验、不盲目重发。Owner 新增禁止项后，既有已发送业务动作的只读回执检查仍可确认事实，但绝不能因此再次 POST。
 
