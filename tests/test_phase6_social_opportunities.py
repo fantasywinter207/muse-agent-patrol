@@ -173,6 +173,45 @@ class SocialTests(unittest.TestCase):
             ob.stage("after-yield","muse","platform_action","post_comment",
                      envelope(content="late"),1006,schedule_context=lease)
 
+    def test_social_complete_requires_confirmed_effect_or_explicit_skip(self):
+        first=self.s.admit(page(candidate("post","post_completion")),1000)
+        ident=first["activities"][0]["activity_id"]
+        current=self.scheduler.dispatch("muse-worker",1001)["activity"]
+        gen=current["lease_version"]
+        with self.assertRaises(ValueError):
+            self.scheduler.complete(ident,"muse-worker",gen,1002,
+                                    {"phase":"done"})
+        self.assertEqual(self.db.read(
+            "SELECT status FROM schedule_activities WHERE id=?",
+            (ident,))[0]["status"],"running")
+        command={"action":"community.post.comment","version":"1",
+                 "resource":{"type":"post","id":"post_completion"},
+                 "input":{"content":"Hello"},"requestId":"social-confirm-0001"}
+        context={"id":ident,"owner":"muse-worker","generation":gen}
+        out_id=Outbox(self.db).stage("social-confirm-1","muse",
+                         "platform_action","post_completion",command,1003,
+                         schedule_context=context)
+        with self.assertRaises(ValueError):
+            self.scheduler.complete(ident,"muse-worker",gen,1004,
+                                    {"observed":"request staged"})
+        # A real Executor would confirm after authenticated receipt readback.
+        # This isolated test only simulates the durable postcondition.
+        with self.db.transaction() as c:
+            c.execute("UPDATE outbox SET status='confirmed' WHERE id=?",(out_id,))
+        completed=self.scheduler.complete(ident,"muse-worker",gen,1005,
+                                          {"outbox_id":out_id,"status":"verified"})
+        self.assertEqual(completed["completed"],ident)
+        more=self.s.admit(page(candidate("post","post_skip")),1006)
+        other=more["activities"][0]["activity_id"]
+        lease=self.scheduler.dispatch("muse-worker",1007)["activity"]
+        self.assertEqual(lease["id"],other)
+        with self.assertRaises(ValueError):
+            self.scheduler.complete(other,"muse-worker",lease["lease_version"],
+                                    1008,{"decision":"skipped"})
+        accepted=self.scheduler.complete(other,"muse-worker",lease["lease_version"],
+                    1008,{"decision":"skipped","reason":"no meaningful contribution"})
+        self.assertEqual(accepted["completed"],other)
+
     def test_urgent_work_preempts_social_at_safe_point(self):
         self.s.admit(page(candidate("post","post_chat")),1000)
         a=self.scheduler.dispatch("muse-worker",1001)["activity"]
