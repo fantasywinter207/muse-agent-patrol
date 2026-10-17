@@ -9,6 +9,9 @@ from patrol.components.outbox.index import Outbox
 from patrol.components.queue.index import Queue
 from patrol.components.config.index import Config
 from patrol.components.runtime.index import Tick
+from patrol.components.wakeup.index import Wakeups
+from patrol.components.promises.index import Promises
+from patrol.components.scheduling.policy.scoring import priority, preemption
 
 
 class PreemptiveSchedulerTests(unittest.TestCase):
@@ -298,6 +301,258 @@ class PreemptiveSchedulerTests(unittest.TestCase):
         # Light Tick leaves human decisions pending for the host; it never
         # takes and blocks a work lease merely because it lacks a model.
         self.assertEqual(self.db.read("SELECT status FROM work_items WHERE logical_key='human:auto'")[0]["status"],"pending")
+
+
+    def test_linked_work_yield_releases_queue_lease_and_reclaims_on_resume(self):
+        work=Queue(self.db).enqueue("human:handoff","human_action",
+                                    {"reason":"formal work"},1000,priority=50)
+        self.scheduler.sync_work(1000)
+        active=self.scheduler.dispatch("worker-a",1001)["activity"]
+        original=Queue(self.db).claim_specific(work,"worker-a",1002,
+                                               {"operator":"approved"})
+        self.assertEqual(original["status"],"running")
+        self.add("deadline-task","research",now=1003,score=70,deadline=1010)
+        self.assertEqual(self.scheduler.assess(1003)["advice"],"checkpoint_at_safe_point")
+        saved=self.scheduler.checkpoint(active["id"],"worker-a",
+                        active["lease_version"],1004,
+                        {"step":2,"summary":"partial"},voluntary=True)
+        self.assertTrue(saved["suspended"])
+        queue_state=self.db.read("SELECT status,lease_owner,lease_version FROM work_items WHERE id=?",(work,))[0]
+        self.assertEqual(queue_state["status"],"pending")
+        self.assertIsNone(queue_state["lease_owner"])
+        self.assertGreater(queue_state["lease_version"],original["lease_version"])
+        with self.assertRaises(StaleLease):
+            Queue(self.db).claim_specific(work,"worker-a",1004.1,{"operator":"stale"})
+        urgent=self.scheduler.dispatch("worker-b",1005)["activity"]
+        self.assertEqual(urgent["logical_key"],"deadline-task")
+        self.scheduler.complete(urgent["id"],"worker-b",urgent["lease_version"],
+                                1006,{"finished":"urgent"})
+        resumed=self.scheduler.dispatch("worker-a",1007)["activity"]
+        self.assertEqual(resumed["id"],active["id"])
+        self.assertEqual(resumed["checkpoint"]["step"],2)
+        again=Queue(self.db).claim_specific(work,"worker-a",1008,{"operator":"approved"})
+        self.assertGreater(again["lease_version"],original["lease_version"])
+        with self.assertRaises(StaleLease):
+            Queue(self.db).finish(original,1009,evidence={"stale":True})
+
+    def test_recovery_fences_both_scheduler_and_queue_leases(self):
+        work=Queue(self.db).enqueue("human:crash-recovery","human_action",
+                                    {"reason":"task"},1000,priority=75)
+        self.scheduler.sync_work(1000)
+        active=self.scheduler.dispatch("worker-a",1001)["activity"]
+        old=Queue(self.db).claim_specific(work,"worker-a",1002,{"started":"real"})
+        # Scheduler expires before the matching Queue lease. Dispatch must
+        # release the old Queue owner, not wait for the next patrol tick.
+        resumed=self.scheduler.dispatch("worker-b",1121)
+        self.assertEqual(resumed["lease_recovered"],1)
+        self.assertEqual(resumed["activity"]["id"],active["id"])
+        row=self.db.read("SELECT status,lease_version FROM work_items WHERE id=?",(work,))[0]
+        self.assertEqual(row["status"],"pending")
+        self.assertGreater(row["lease_version"],old["lease_version"])
+        fresh=Queue(self.db).claim_specific(work,"worker-b",1122,{"reconciled":"outbox"})
+        self.assertEqual(fresh["lease_owner"],"worker-b")
+
+    def test_scheduler_work_requires_matching_queue_claim_before_effect(self):
+        work=Queue(self.db).enqueue("human:fenced","human_action",
+                                    {"reason":"requires claim"},1000,priority=75)
+        self.scheduler.sync_work(1000)
+        active=self.scheduler.dispatch("worker-a",1001)["activity"]
+        context={"id":active["id"],"owner":"worker-a",
+                 "generation":active["lease_version"]}
+        with self.assertRaises(StaleLease):
+            Outbox(self.db).stage("premature","muse","send","chat",
+                                  {"content":"not claimed"},1001,schedule_context=context)
+        Queue(self.db).claim_specific(work,"worker-a",1002,{"operator":"approved"})
+        ident=Outbox(self.db).stage("claimed","muse","send","chat",
+                                   {"content":"safe"},1003,schedule_context=context)
+        self.assertTrue(ident)
+
+    def test_unscheduled_business_staging_cannot_bypass_active_generation(self):
+        self.add("social-work","social")
+        with self.assertRaises(StaleLease):
+            Outbox(self.db).stage("unfenced-ready","muse","send","chat",
+                                  {"content":"must be scheduled"},1000)
+        running=self.scheduler.dispatch("worker",1001)["activity"]
+        with self.assertRaises(StaleLease):
+            Outbox(self.db).stage("unfenced-running","muse","send","chat",
+                                  {"content":"must be scheduled"},1002)
+        self.scheduler.checkpoint(running["id"],"worker",running["lease_version"],
+                                  1003,{"phase":"paused"},voluntary=True)
+        with self.assertRaises(StaleLease):
+            Outbox(self.db).stage("unfenced-suspended","muse","send","chat",
+                                  {"content":"must be scheduled"},1004)
+        # System receipt actions are intentionally independent of the
+        # Scheduler, so the existing HATCH read/ack lane still works.
+        ident=Outbox(self.db).stage("system-ack","muse","ack","inbox",
+                                   {"ids":[1]},1005)
+        self.assertTrue(ident)
+
+    def test_disappearing_challenger_clears_preemption_and_avoids_yield(self):
+        running_id=self.add("current","research",score=50)
+        first=self.scheduler.dispatch("worker",1000)["activity"]
+        contender=self.add("cancelled-urgent","research",now=1001,
+                           score=90,deadline=1010)
+        decision=self.scheduler.dispatch("other",1002)
+        self.assertEqual(decision["advice"],"checkpoint_at_safe_point")
+        self.scheduler.cancel(contender,1003,"no longer needed")
+        continued=self.scheduler.checkpoint(running_id,"worker",
+                           first["lease_version"],1004,{"progress":"ongoing"})
+        self.assertFalse(continued["suspended"])
+        self.assertFalse(continued["activity"]["preempt_requested"])
+        self.assertEqual(self.scheduler.reconcile(1005)["decision"]["advice"],"continue")
+
+
+    def test_deadline_escalation_triggers_host_wakeup_for_low_base_work(self):
+        work=Queue(self.db).enqueue("human:deadline-wakeup","human_action",
+                                    {"reason":"due soon"},1000,priority=15,
+                                    due_at=1010)
+        self.scheduler.sync_work(1000)
+        count=Wakeups(self.db).stage(1000,threshold=70)
+        self.assertEqual(count,1)
+        result=self.db.read("""SELECT priority,source_id FROM wakeup_requests
+            WHERE source_type='work'""")[0]
+        self.assertEqual(result["source_id"],work)
+        self.assertGreaterEqual(result["priority"],70)
+
+    def test_distant_low_priority_work_does_not_wake_host_early(self):
+        Queue(self.db).enqueue("human:distant","human_action",
+                               {"reason":"not due"},1000,priority=15,
+                               due_at=1000+7200)
+        self.scheduler.sync_work(1000)
+        self.assertEqual(Wakeups(self.db).stage(1000,threshold=70),0)
+
+
+    def test_evidenced_blocked_work_handoff_reserves_scheduler_atomically(self):
+        work=Queue(self.db).enqueue("human:manual-unblock","human_action",
+                                    {"reason":"operator decision"},1000,priority=85)
+        self.scheduler.sync_work(1000)
+        with self.db.transaction() as cur:
+            cur.execute("UPDATE work_items SET status='blocked' WHERE id=?",(work,))
+        self.assertIsNone(self.scheduler.assess(1001)["candidate"])
+        claimed=Queue(self.db).claim_specific(work,"muse-a",1002,
+                                               {"approved_by":"operator"})
+        self.assertEqual(claimed["status"],"running")
+        active=self.scheduler.snapshot(1002)["decision"]["running"]
+        self.assertEqual(claimed["scheduler_activity_id"],active["id"])
+        self.assertEqual(claimed["scheduler_generation"],active["lease_version"])
+        context={"id":active["id"],"owner":"muse-a",
+                 "generation":active["lease_version"]}
+        sent=Outbox(self.db).stage("manual-safe","muse","send","chat",
+                                    {"content":"approved"},1003,
+                                    schedule_context=context)
+        self.assertTrue(sent)
+
+    def test_scheduler_fencing_survives_completion_of_last_activity(self):
+        activity=self.add("short-maintenance","maintenance")
+        running=self.scheduler.dispatch("worker",1000)["activity"]
+        self.scheduler.complete(activity,"worker",running["lease_version"],
+                                1001,{"result":"done"})
+        with self.assertRaises(StaleLease):
+            Outbox(self.db).stage("post-completion-bypass","muse",
+                                  "send","chat",{"content":"no fence"},1002)
+
+
+    def test_unbounded_waiting_credit_eventually_beats_continuous_high_base(self):
+        self.add("urgent-looking-background","maintenance",now=1000,score=100)
+        low=self.add("patient-background","maintenance",now=1000,score=5)
+        picked=self.scheduler.dispatch("worker",1000)["activity"]
+        # Use the pure heuristic to avoid expiring the simulated worker lease.
+        running=self.db.read("SELECT * FROM schedule_activities WHERE id=?",(picked["id"],))[0]
+        waiting=self.db.read("SELECT * FROM schedule_activities WHERE id=?",(low,))[0]
+        self.assertLess(priority(waiting,1001),priority(running,1001,running=True))
+        self.assertGreater(priority(waiting,5000),priority(running,5000,running=True))
+        self.assertIsNotNone(preemption(running,waiting,5000))
+
+    def test_imminent_deadline_protected_from_aged_nonurgent_activity(self):
+        imminent=self.add("hard-due","work",now=1000,score=70,deadline=1015)
+        waiting=self.add("old-background","maintenance",now=0,score=5)
+        active=self.scheduler.dispatch("worker",1000)["activity"]
+        self.assertEqual(active["id"],imminent)
+        running=self.db.read("SELECT * FROM schedule_activities WHERE id=?",(imminent,))[0]
+        challenger=self.db.read("SELECT * FROM schedule_activities WHERE id=?",(waiting,))[0]
+        # A giant waiting credit must not force a task due in 15 seconds
+        # out of its running safe point.
+        self.assertIsNone(preemption(running,challenger,1000))
+
+
+    def test_versioned_checkpoint_restores_progress_and_inspects_outbox(self):
+        task=self.add("versioned-context","research",now=1000,score=55)
+        running=self.scheduler.dispatch("muse",1001)["activity"]
+        guard={"id":task,"owner":"muse","generation":running["lease_version"]}
+        outbox_id=Outbox(self.db).stage("restore-intent","muse","send","chat",
+                                      {"content":"already drafted"},1002,
+                                      schedule_context=guard)
+        checkpoint={"schema_version":1,"goal":"finish research",
+                    "phase":"draft","completed_steps":["verified topic"],
+                    "next_actions":["review source"],"decisions":["avoid duplicates"],
+                    "resource_refs":[{"type":"task","id":"tsk_123"}],
+                    "pending_outbox_ids":[outbox_id],
+                    "source_task_version":2,"saved_at":1003}
+        self.scheduler.checkpoint(task,"muse",running["lease_version"],1003,
+                                  checkpoint,voluntary=True)
+        pack=self.scheduler.restore(task,1004)
+        self.assertEqual(pack["checkpoint_format"],"v1")
+        self.assertEqual(pack["checkpoint"]["completed_steps"],["verified topic"])
+        self.assertTrue(pack["requires_outbox_reconciliation"])
+        self.assertEqual(pack["outbox_receipts"][0]["status"],"prepared")
+        self.assertFalse(pack["side_effects_executed"])
+        self.assertFalse(pack["model_state_restored"])
+        with self.db.transaction() as cur:
+            cur.execute("UPDATE outbox SET status='confirmed' WHERE id=?",(outbox_id,))
+        self.assertFalse(self.scheduler.restore(task,1005)["requires_outbox_reconciliation"])
+
+    def test_versioned_checkpoint_rejects_invalid_ids_and_untrusted_structure(self):
+        task=self.add("invalid-context","maintenance",now=1000)
+        running=self.scheduler.dispatch("muse",1000)["activity"]
+        base={"schema_version":1,"goal":"continue","phase":"analysis",
+              "completed_steps":[],"next_actions":[],"decisions":[],
+              "resource_refs":[],"pending_outbox_ids":[],
+              "source_task_version":None,"saved_at":1001}
+        for bad in (
+            dict(base, schema_version=99),
+            dict(base, resource_refs=[{"type":"task","id":"injected instructions with spaces"}]),
+            dict(base, pending_outbox_ids=["duplicate","duplicate"]),
+            dict(base, saved_at=float("nan")),
+            dict(base, source_task_version=-1),
+            dict(base, unexpected="must fail"),
+        ):
+            with self.assertRaises(ValueError):
+                self.scheduler.checkpoint(task,"muse",running["lease_version"],1001,bad)
+        self.assertIsNone(self.scheduler.restore(task,1002)["checkpoint"])
+        self.scheduler.checkpoint(task,"muse",running["lease_version"],1003,
+                                  {"legacy_step":"still valid"})
+        self.assertEqual(self.scheduler.restore(task,1004)["checkpoint_format"],"legacy")
+
+
+    def test_due_nonhuman_promise_is_runnable_and_requires_progress(self):
+        pid=Promises(self.db).create("muse","owner","source:promise-nonhuman",
+            "deliver verifiable result",1000,1001,1002,due_at=1300,kind="complex")
+        self.assertEqual(self.scheduler.sync_work(1000),1)
+        self.assertEqual(self.scheduler.sync_work(1000),0)
+        self.assertEqual(Wakeups(self.db).stage(1000,threshold=70),1)
+        wake=Wakeups(self.db).claim_next("hatch",1000)
+        self.assertEqual(wake["source_type"],"promise")
+        Wakeups(self.db).acknowledge(wake["id"],"hatch",wake["lease_version"],
+                                     1001,"accepted",{"host":"verified"})
+        running=self.scheduler.dispatch("muse",1002)["activity"]
+        self.assertEqual(running["kind"],"promise")
+        with self.assertRaises(ValueError):
+            self.scheduler.complete(running["id"],"muse",running["lease_version"],
+                                     1003,{"claimed":"no real progress"})
+        Wakeups(self.db).record_execution(wake["id"],wake["lease_version"],
+            running["id"],running["lease_version"],"muse","started",1003,
+            {"session":"actual"})
+        Promises(self.db).progress(pid,1004,{"artifact":"first concrete step"},1150)
+        self.scheduler.complete(running["id"],"muse",running["lease_version"],
+                                1005,{"recorded_progress":"promise"})
+        Wakeups(self.db).record_execution(wake["id"],wake["lease_version"],
+            running["id"],running["lease_version"],"muse","finished",1006,
+            {"progress":"verified"})
+        self.assertEqual(self.scheduler.sync_work(1006),0)
+        self.assertEqual(self.scheduler.sync_work(1050),1)
+        candidate=self.scheduler.assess(1050)["candidate"]
+        self.assertEqual(candidate["kind"],"promise")
+        self.assertNotEqual(candidate["id"],running["id"])
 
 
 if __name__=="__main__":

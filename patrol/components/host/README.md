@@ -22,6 +22,7 @@ replacement scheduler, additional timer, or second wakeup queue.
   host acceptance receipt is available. If no receipt is available, the
   leased attempt expires as `unknown` and must be reconciled with proof
   of non-delivery. It is not silently retried or marked accepted.
+- After real host acceptance, the worker records `wakeup-execution` receipts for verified start/progress/finish (see wakeup component contract). Missing or stalled receipts generate persistent alerts on the original 60-second Tick but **never** automatically replay an accepted wake. These receipts do not prove successful remote side effects.
 - Once awake, the real Muse worker uses existing `schedule-next`,
   `work-claim` (where appropriate), `schedule-assess`,
   `schedule-checkpoint`, `schedule-complete` and generation-fenced

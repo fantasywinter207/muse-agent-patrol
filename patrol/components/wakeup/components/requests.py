@@ -1,6 +1,7 @@
 """Durable wakeup intent outbox. NEVER calls a model, Cron, Hook or remote API."""
 import json
 from ...persistence.index import canonical, new_id, StaleLease
+from ...scheduling.index import activity_priority
 
 
 class Wakeups:
@@ -15,20 +16,35 @@ class Wakeups:
         with self.db.transaction() as c:
             # Only actual agent-decision work, not mere uninspected messages.
             # Blocked includes 'no executor': it still needs Muse judgement.
-            works=c.execute("""SELECT w.id,w.priority,e.source
+            works=c.execute("""SELECT w.id,w.priority,e.source,
+                    a.status AS activity_status,a.base_priority,a.deadline,
+                    a.ready_since,a.virtual_runtime,a.switch_cost
                 FROM work_items w LEFT JOIN events e ON e.id=w.event_id
+                LEFT JOIN schedule_activities a ON a.work_id=w.id
                 WHERE w.type='human_action'
                   AND w.status IN ('pending','retry_wait','blocked','needs_approval')
-                  AND w.priority>=? AND (w.event_id IS NULL OR e.source IN ('messages','agent_events'))
+                  AND (w.priority>=? OR
+                       (a.status IN ('ready','suspended')
+                        AND w.due_at IS NOT NULL AND a.deadline<=?))
+                  AND (w.event_id IS NULL OR e.source IN ('messages','agent_events'))
                   AND NOT EXISTS(SELECT 1 FROM promises p WHERE p.work_item_id=w.id)
-                ORDER BY w.priority DESC,w.created_at LIMIT ?""",(threshold,limit)).fetchall()
+                ORDER BY w.priority DESC,w.created_at LIMIT ?""",
+                (threshold,now+3600,min(800,max(limit*4,limit)))).fetchall()
             for w in works:
+                # Use the same dynamic deadline/fairness policy as Scheduler;
+                # a low base score can become urgent near its real deadline.
+                effective=max(float(w["priority"]),activity_priority(w,now)) if (
+                    w["activity_status"] in ("ready","suspended")
+                ) else float(w["priority"])
+                if effective<threshold:
+                    continue
+                effective=min(100,max(0,int(round(effective))))
                 k="work:"+w["id"]
                 n=c.execute("""INSERT INTO wakeup_requests(
                     id,logical_key,source_type,source_id,priority,reason,created_at,next_attempt_at)
                     VALUES(?,?,'work',?,?,?, ?,?)
                     ON CONFLICT(logical_key) DO NOTHING""",
-                    (new_id(),k,w["id"],min(100,max(0,w["priority"])),
+                    (new_id(),k,w["id"],effective,
                      "authorized agent decision needed; not platform approval",now,now)).rowcount
                 added+=n
             # Only due or near-due promises, never every dormant future promise.
@@ -247,3 +263,165 @@ class Wakeups:
             if n!=1:
                 raise ValueError("unknown delivery state required")
         return {"id":ident,"status":"retry_wait","host_called":False}
+
+
+    def record_execution(self, ident, wakeup_generation, activity_id,
+                         activity_generation, worker, phase, now, evidence):
+        """Worker-owned receipts are separate from HATCH's host acceptance.
+
+        This call does NOT invoke a model or certify a remote platform action.
+        Only a live Scheduler lease may attest start/progress. Completion
+        requires independently completed Scheduler state.
+        """
+        if (phase not in ("started","progress","finished")
+                or type(wakeup_generation) is not int or wakeup_generation<1
+                or type(activity_generation) is not int or activity_generation<1
+                or not isinstance(worker,str) or not 1<=len(worker)<=128
+                or not isinstance(evidence,dict) or not evidence):
+            raise ValueError("bounded execution receipt and worker evidence required")
+        payload=canonical(evidence)
+        if len(payload.encode("utf-8"))>4096:
+            raise ValueError("worker execution evidence exceeds 4 KiB")
+        with self.db.transaction() as c:
+            wake=c.execute("SELECT * FROM wakeup_requests WHERE id=?",(ident,)).fetchone()
+            if (not wake or wake["status"]!="accepted"
+                    or wake["lease_version"]!=wakeup_generation):
+                raise StaleLease("verified accepted host wake generation required")
+            activity=c.execute("SELECT * FROM schedule_activities WHERE id=?",
+                               (activity_id,)).fetchone()
+            if not activity:
+                raise StaleLease("unknown Scheduler activity")
+            if wake["source_type"]=="work":
+                matched=activity["work_id"]==wake["source_id"]
+            elif wake["source_type"]=="social":
+                matched=activity["id"]==wake["source_id"]
+            else:
+                promise=c.execute("SELECT work_item_id FROM promises WHERE id=?",
+                                  (wake["source_id"],)).fetchone()
+                matched=bool(promise and (
+                    activity["work_id"]==promise["work_item_id"] or
+                    activity["logical_key"]==
+                    "promise_due:"+wake["logical_key"][len("promise:"):]
+                ))
+            if not matched:
+                raise StaleLease("wakeup source does not belong to activity")
+            prior=c.execute("SELECT * FROM wakeup_execution_receipts WHERE wakeup_id=?",
+                            (ident,)).fetchone()
+            if phase in ("started","progress"):
+                if (activity["status"]!="running" or activity["lease_owner"]!=worker
+                        or activity["lease_version"]!=activity_generation
+                        or activity["lease_until"]<=now):
+                    raise StaleLease("worker execution needs a live scheduler generation")
+            elif (activity["status"]!="completed"
+                  or activity["lease_version"]!=activity_generation+1):
+                raise StaleLease("completion needs a finished scheduler generation")
+            if prior:
+                if (prior["worker"]!=worker
+                        or prior["activity_id"]!=activity_id
+                        or prior["wakeup_generation"]!=wakeup_generation
+                        or activity_generation<prior["activity_generation"]
+                        or (activity_generation>prior["activity_generation"]
+                            and phase!="progress")):
+                    raise StaleLease("worker or generation stale; resumed slice must attest progress")
+                # After a safe-point yield, the same verified worker may
+                # record progress under a *new*, currently live Scheduler
+                # generation, without rewriting the original host wakeup.
+                if prior["status"]=="finished":
+                    return {"wakeup_id":ident,"phase":"finished","already_recorded":True}
+                if phase=="started":
+                    return {"wakeup_id":ident,"phase":prior["status"],"already_recorded":True}
+                c.execute("""UPDATE wakeup_execution_receipts
+                    SET status=?,activity_generation=?,updated_at=?,
+                        finished_at=?,evidence=?
+                    WHERE wakeup_id=?""",
+                    (phase,activity_generation,now,
+                     now if phase=="finished" else None,payload,ident))
+            else:
+                if phase!="started":
+                    raise ValueError("execution must be started before progress or finish")
+                c.execute("""INSERT INTO wakeup_execution_receipts(
+                    wakeup_id,wakeup_generation,activity_id,activity_generation,
+                    worker,status,started_at,updated_at,evidence)
+                    VALUES(?,?,?,?,?,'started',?,?,?)""",
+                    (ident,wakeup_generation,activity_id,activity_generation,
+                     worker,now,now,payload))
+        return {"wakeup_id":ident,"phase":phase,"already_recorded":False,
+                "remote_action_confirmed":False}
+
+    def execution_health(self, now, threshold=300, limit=100):
+        """Idempotent, non-dispatching audit of stalled accepted wakeups.
+
+        An accepted host wake is never automatically replayed just because
+        this watchdog did not observe model/worker progress.
+        """
+        if (type(threshold) is not int or not 60<=threshold<=86400
+                or type(limit) is not int or not 1<=limit<=500):
+            raise ValueError("invalid bounded execution health scan")
+        counts={"accepted_without_start":0,"started_without_progress":0,
+                "new_alerts":0,"host_invoked":False}
+        with self.db.transaction() as c:
+            rows=c.execute("""SELECT w.*,x.status AS execution_status,
+                x.updated_at AS execution_at
+                FROM wakeup_requests w
+                LEFT JOIN wakeup_execution_receipts x ON x.wakeup_id=w.id
+                WHERE w.status='accepted'
+                  AND COALESCE(x.updated_at,w.confirmed_at,w.created_at)<=?
+                  AND (x.status IS NULL OR x.status!='finished')
+                  AND NOT EXISTS(
+                      SELECT 1 FROM alerts a
+                      WHERE a.logical_key=('wakeup_execution:'||w.id||':'||
+                          CAST(w.lease_version AS TEXT)||':'||
+                          CASE WHEN x.status IS NULL THEN 'accepted_without_start'
+                               ELSE 'started_without_progress' END)
+                  )
+                ORDER BY COALESCE(x.updated_at,w.confirmed_at,w.created_at),w.id
+                LIMIT ?""",(now-threshold,limit)).fetchall()
+            for row in rows:
+                if not self._source_alive(c,row):
+                    continue
+                kind=("accepted_without_start" if row["execution_status"] is None
+                      else "started_without_progress")
+                counts[kind]+=1
+                key="wakeup_execution:"+row["id"]+":"+str(row["lease_version"])+":"+kind
+                detail={"wakeup_id":row["id"],"source_type":row["source_type"],
+                        "source_id":row["source_id"],"reason":kind,
+                        "requires_host_reconciliation":True,
+                        "auto_retried":False}
+                counts["new_alerts"]+=c.execute("""INSERT INTO alerts(
+                    logical_key,kind,detail,created_at) VALUES(?,?,?,?)
+                    ON CONFLICT(logical_key) DO NOTHING""",
+                    (key,kind,canonical(detail),now)).rowcount
+        return counts
+
+
+    def reconcile_accepted_no_start(self, ident, now, proven_not_started, evidence):
+        """Operator/host-authenticated absence proof permits a controlled retry.
+
+        An accepted wake cannot be assumed absent from missing heartbeat alone.
+        Never downgrade a wake that has any worker execution receipt.
+        """
+        if (proven_not_started is not True or not isinstance(evidence,dict)
+                or not evidence or len(canonical(evidence).encode("utf-8"))>4096):
+            raise ValueError("explicit bounded non-execution proof is required")
+        with self.db.transaction() as c:
+            wake=c.execute("SELECT * FROM wakeup_requests WHERE id=?",
+                           (ident,)).fetchone()
+            if not wake or wake["status"]!="accepted":
+                raise StaleLease("only an accepted wake may be reconciled")
+            if c.execute("SELECT 1 FROM wakeup_execution_receipts WHERE wakeup_id=?",
+                         (ident,)).fetchone():
+                raise StaleLease("worker execution already observed; cannot retry host wake")
+            if not self._source_alive(c,wake):
+                raise StaleLease("source no longer needs a host wake")
+            # Preserve original delivery evidence. Append the independent
+            # non-execution proof instead of overwriting the host receipt.
+            c.execute("""INSERT INTO alerts(logical_key,kind,detail,created_at)
+                VALUES(?,?,?,?)""",
+                ("wakeup_reconcile_accepted:"+ident+":"+str(wake["lease_version"]),
+                 "accepted_no_start_reconciled",
+                 canonical({"wakeup_id":ident,"generation":wake["lease_version"],
+                            "absence_proof":evidence}),now))
+            c.execute("""UPDATE wakeup_requests SET status='retry_wait',
+                next_attempt_at=? WHERE id=? AND status='accepted'""",(now,ident))
+        return {"id":ident,"status":"retry_wait","host_called":False,
+                "original_host_acceptance_preserved":True}

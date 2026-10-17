@@ -71,6 +71,30 @@ class Queue:
         if not owner or not ident or not isinstance(authorization_evidence,dict) or not authorization_evidence:
             raise ValueError("owner, work id, and documented operator authorization required")
         with self.db.transaction() as c:
+            # Scheduler-controlled work must be claimed by the same worker
+            # in the current live time slice; legacy unscheduled work is
+            # unchanged. Prevent claiming the underlying Queue in suspension.
+            activity=c.execute("""SELECT id,status,lease_owner,lease_version,
+                    lease_until,preempt_requested,weight FROM schedule_activities
+                    WHERE work_id=?""",(ident,)).fetchone()
+            source=c.execute("SELECT status FROM work_items WHERE id=?",(ident,)).fetchone()
+            if source and source["status"]=="running":
+                raise ValueError("human work unavailable or already leased")
+            manual_unblock=bool(
+                activity and source and
+                source["status"] in ("blocked","needs_approval") and
+                activity["status"] in ("ready","suspended") and
+                not c.execute("SELECT 1 FROM schedule_activities WHERE status='running' LIMIT 1").fetchone()
+            )
+            # An explicitly evidenced operator handoff of blocked work
+            # precedes scheduling; it does not grant remote permissions.
+            if activity and not manual_unblock and (
+                activity["status"]!="running" or
+                activity["lease_owner"]!=owner or
+                activity["lease_until"] is None or activity["lease_until"]<=now or
+                activity["preempt_requested"]
+            ):
+                raise StaleLease("work claim requires the active scheduler lease")
             n=c.execute("""UPDATE work_items SET status='running',lease_owner=?,lease_until=?,
                 lease_version=lease_version+1,attempts=attempts+1
                 WHERE id=? AND type='human_action' AND status IN
@@ -79,6 +103,28 @@ class Queue:
             if n!=1:
                 raise ValueError("human work unavailable or already leased")
             row=dict(c.execute("SELECT * FROM work_items WHERE id=?",(ident,)).fetchone())
+            if manual_unblock:
+                # An operator can explicitly clear a blocked work item without
+                # an existing model slice. Reserve its Scheduler lease in this
+                # SAME transaction so the resulting action still needs fencing.
+                slice_seconds=min(30.0,max(1.0,self.lease_seconds-1.0))
+                n=c.execute("""UPDATE schedule_activities SET status='running',
+                    lease_owner=?,lease_version=lease_version+1,
+                    lease_until=?,slice_until=?,last_started_at=?,
+                    last_charged_at=?,last_updated=?,preempt_requested=0,
+                    preempt_mode=NULL,preempt_reason=NULL
+                    WHERE id=? AND status IN ('ready','suspended')""",
+                    (owner,now+self.lease_seconds,now+slice_seconds,now,now,now,
+                     activity["id"])).rowcount
+                if n!=1:
+                    raise StaleLease("manual work handoff could not reserve scheduler")
+            if activity:
+                lease=c.execute("""SELECT id,lease_version FROM schedule_activities
+                    WHERE work_id=? AND status='running' AND lease_owner=?""",
+                    (ident,owner)).fetchone()
+                if lease:
+                    row["scheduler_activity_id"]=lease["id"]
+                    row["scheduler_generation"]=lease["lease_version"]
             # Append-only evidence of the claimed local handoff, including lease generation.
             # This is not a CrewQuay permission check or remote task claim.
             detail={"work_id":ident,"owner":owner,"lease_version":row["lease_version"],

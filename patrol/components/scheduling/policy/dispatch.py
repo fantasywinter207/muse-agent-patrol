@@ -6,6 +6,7 @@ Remote side effects live in Outbox and must be reconciled independently.
 import json
 import math
 from .scoring import priority, quantum, preemption
+from .checkpoint import validate as validate_checkpoint
 from ...persistence.index import canonical, new_id, StaleLease
 
 KINDS=frozenset(("work","promise","social","research","maintenance"))
@@ -109,9 +110,12 @@ class Scheduler:
                 score=(row["message_score"] if row["event_source"]=="messages"
                        and row["message_score"] is not None else row["priority"])
                 score=min(100,max(0,score))
+                # A generic low-score event's suggested start_by (often
+                # now+180s) is not a formal delivery deadline. Treating it
+                # as EDF urgency turns stale events into false emergencies.
                 deadline=(row["promise_due"] if row["promise_due"] is not None else
                           row["due_at"] if row["due_at"] is not None else
-                          row["start_by"])
+                          row["start_by"] if score>=70 else None)
                 existing=c.execute("SELECT id,status FROM schedule_activities WHERE logical_key=?",
                                    (key,)).fetchone()
                 if existing:
@@ -126,6 +130,44 @@ class Scheduler:
                   VALUES(?,?, 'work',?,'ready',?,?,?,?,?,?,?)""",
                   (new_id(),key,row["id"],score,50,deadline,4,now,now,now))
                 added+=1
+            # Non-human_action promises have a separate host wake source, but
+            # previously had no runnable Scheduler activity after wakeup.
+            # Derive a one-shot activity per due next-action checkpoint.
+            # Human_action promises already have a linked work activity.
+            due_promises=c.execute("""SELECT p.id,p.next_action_at
+                FROM promises p JOIN work_items w ON w.id=p.work_item_id
+                WHERE p.status!='done' AND w.type!='human_action'
+                  AND (p.next_action_at<=? OR
+                       (p.first_action_at IS NULL AND p.start_by<=?) OR
+                       (p.due_at IS NOT NULL AND p.due_at<=?))
+                ORDER BY p.next_action_at,p.id LIMIT ?""",
+                (now+120,now,now,limit)).fetchall()
+            for p in due_promises:
+                logical="promise_due:"+p["id"]+":"+str(p["next_action_at"])
+                if c.execute("SELECT 1 FROM schedule_activities WHERE logical_key=?",
+                             (logical,)).fetchone():
+                    continue
+                c.execute("""INSERT INTO schedule_activities
+                    (id,logical_key,kind,work_id,status,base_priority,weight,
+                     deadline,switch_cost,created_at,ready_since,last_updated)
+                    VALUES(?,?,'promise',NULL,'ready',95,60,?,4,?,?,?)""",
+                    (new_id(),logical,p["next_action_at"],now,now,now))
+                added+=1
+            # Advance old checkpoints only when their promise has recorded
+            # progress (new next_action_at) or has been completed. A lease
+            # generation is fenced at the same local transaction boundary.
+            c.execute("""UPDATE schedule_activities SET status='completed',
+                lease_owner=NULL,lease_until=NULL,slice_until=NULL,
+                lease_version=lease_version+1,preempt_requested=0,
+                preempt_mode=NULL,last_updated=?,
+                preempt_reason='promise advanced or completed'
+                WHERE kind='promise' AND logical_key LIKE 'promise_due:%'
+                AND status IN ('ready','running','suspended')
+                AND NOT EXISTS(
+                    SELECT 1 FROM promises p WHERE p.status!='done'
+                    AND schedule_activities.logical_key=
+                       ('promise_due:'||p.id||':'||CAST(p.next_action_at AS TEXT))
+                )""",(now,))
             # External workers retain their own Queue fencing. A locally
             # completed work item invalidates an unleased scheduled copy,
             # but cannot undo anything already dispatched to Outbox.
@@ -155,6 +197,16 @@ class Scheduler:
         if not active or active["lease_until"]>now:
             return 0
         self._charge(c,active,now)
+        # Scheduler and local work are separate leases. A crashed Scheduler
+        # must fence the matching Queue lease as well, otherwise a resumed
+        # activity can remain unclaimable until a later Queue tick.
+        if active["work_id"]:
+            c.execute("""UPDATE work_items SET status='pending',
+                lease_owner=NULL,lease_until=NULL,
+                lease_version=lease_version+1,next_action_at=?,
+                block_reason='scheduler lease expired; reconcile Outbox'
+                WHERE id=? AND status='running' AND lease_owner=?""",
+                (now,active["work_id"],active["lease_owner"]))
         c.execute("""UPDATE schedule_activities SET status='suspended',
             lease_owner=NULL,lease_until=NULL,slice_until=NULL,
             lease_version=lease_version+1,ready_since=?,last_updated=?,
@@ -168,17 +220,24 @@ class Scheduler:
         contenders=self._ready(c,now)
         best=self._best(contenders,now)
         mode=preemption(current,best,now) if current else None
-        if current and mode and mutate and not current["preempt_requested"]:
-            c.execute("""UPDATE schedule_activities
-                SET preempt_requested=1,preempt_mode=?,preempt_reason=?,
-                    last_updated=? WHERE id=? AND status='running'""",
-                (mode,"a higher-value eligible activity is ready",now,current["id"]))
-            current=self._current(c)
+        if current and mutate:
+            # A request is not a latched cancellation. Withdraw it if the
+            # challenger disappeared (or no longer clears hysteresis).
+            if mode and (not current["preempt_requested"] or current["preempt_mode"]!=mode):
+                c.execute("""UPDATE schedule_activities
+                    SET preempt_requested=1,preempt_mode=?,preempt_reason=?,
+                        last_updated=? WHERE id=? AND status='running'""",
+                    (mode,"a higher-value eligible activity is ready",now,current["id"]))
+                current=self._current(c)
+            elif not mode and current["preempt_requested"]:
+                c.execute("""UPDATE schedule_activities SET preempt_requested=0,
+                    preempt_mode=NULL,preempt_reason=NULL,last_updated=?
+                    WHERE id=? AND status='running'""",(now,current["id"]))
+                current=self._current(c)
         return {"running":self._public(current,now),
                 "candidate":self._public(best,now),
-                "preemption":current["preempt_mode"] if current and current["preempt_requested"] else mode,
-                "advice":"checkpoint_at_safe_point" if current and
-                         (current["preempt_requested"] or mode) else
+                "preemption":mode,
+                "advice":"checkpoint_at_safe_point" if current and mode else
                          "continue" if current else "ready_to_dispatch" if best else "idle",
                 "remote_side_effects":"not managed by scheduler"}
 
@@ -244,6 +303,7 @@ class Scheduler:
         if (not isinstance(data,dict) or not data or
                 len(canonical(data).encode("utf-8"))>32768):
             raise ValueError("nonempty checkpoint <=32KiB required")
+        validate_checkpoint(data)
         with self.db.transaction() as c:
             row=self._owned(c,ident,owner,generation,now)
             self._charge(c,row,now)
@@ -251,8 +311,23 @@ class Scheduler:
                                (ident,)).fetchone())
             contenders=self._best(self._ready(c,now),now)
             mode=preemption(row,contenders,now)
-            suspended=bool(voluntary or row["preempt_requested"] or mode)
+            # Re-evaluate at the actual safe point. A withdrawn or completed
+            # challenger must not force an obsolete yield.
+            suspended=bool(voluntary or mode)
             if suspended:
+                if row["work_id"]:
+                    # Release only the work lease owned by this scheduler
+                    # worker. A different live owner is a conflicting claim.
+                    work=c.execute("""SELECT status,lease_owner,lease_until
+                        FROM work_items WHERE id=?""",(row["work_id"],)).fetchone()
+                    if work and work["status"]=="running":
+                        if work["lease_owner"]!=owner and work["lease_until"]>now:
+                            raise StaleLease("linked local work is leased to another owner")
+                        c.execute("""UPDATE work_items SET status='pending',
+                            lease_owner=NULL,lease_until=NULL,
+                            lease_version=lease_version+1,next_action_at=?,
+                            block_reason='checkpoint yielded; reconcile Outbox'
+                            WHERE id=? AND status='running'""",(now,row["work_id"]))
                 c.execute("""UPDATE schedule_activities SET
                     status='suspended',checkpoint=?,lease_owner=NULL,
                     lease_until=NULL,slice_until=NULL,
@@ -269,7 +344,8 @@ class Scheduler:
                 next_slice=(row["slice_until"] if now<row["slice_until"]
                     else now+min(quantum(row["weight"]),self.lease_seconds-1.0))
                 c.execute("""UPDATE schedule_activities SET checkpoint=?,
-                    lease_until=?,slice_until=?,last_updated=?
+                    lease_until=?,slice_until=?,preempt_requested=0,
+                    preempt_mode=NULL,preempt_reason=NULL,last_updated=?
                     WHERE id=?""",
                     (canonical(data),now+self.lease_seconds,
                      next_slice,now,ident))
@@ -278,6 +354,46 @@ class Scheduler:
             return {"suspended":suspended,"activity":self._public(new,now),
                     "next_step":"dispatch_again" if suspended else "continue",
                     "warning":"previously staged remote effects remain in Outbox"}
+
+    def restore(self,ident,now):
+        """Read-only restoration pack; caller must independently obtain a lease.
+
+        Checkpoint text is untrusted context, never instructions or permission.
+        Remote resource references must be re-read with current authorization.
+        Existing Outbox IDs are inspected but never resent here.
+        """
+        if not isinstance(ident,str) or not ident or len(ident)>128:
+            raise ValueError("bounded schedule activity ID required")
+        rows=self.db.read("SELECT * FROM schedule_activities WHERE id=?",(ident,))
+        if not rows:
+            raise ValueError("unknown schedule activity")
+        row=rows[0]
+        data=json.loads(row["checkpoint"]) if row["checkpoint"] else None
+        fmt=validate_checkpoint(data) if data is not None else "none"
+        pending=data.get("pending_outbox_ids",[]) if fmt=="v1" else []
+        results=[]
+        for outbox_id in pending:
+            lookup=self.db.read("SELECT status,remote_id FROM outbox WHERE id=?",
+                                (outbox_id,))
+            results.append({"id":outbox_id,"status":lookup[0]["status"] if lookup else "missing",
+                            "remote_id":lookup[0]["remote_id"] if lookup else None})
+        work=None
+        if row["work_id"]:
+            w=self.db.read("SELECT status,next_action_at,lease_version FROM work_items WHERE id=?",
+                           (row["work_id"],))
+            work=w[0] if w else {"status":"missing"}
+        return {"activity_id":ident,"kind":row["kind"],"status":row["status"],
+                "checkpoint_format":fmt,"checkpoint":data,
+                "outbox_receipts":results,"work":work,
+                "scheduler_generation":row["lease_version"],
+                "next_step":"obtain_new_schedule_next_lease" if row["status"] in ACTIVE else
+                            "inspect_current_running_lease" if row["status"]=="running" else
+                            "terminal_do_not_resume",
+                "requires_remote_resource_revalidation":True,
+                "requires_outbox_reconciliation":any(
+                    v["status"] not in ("confirmed","resolved") for v in results),
+                "model_state_restored":False,
+                "side_effects_executed":False}
 
     def complete(self,ident,owner,generation,now,evidence):
         if not isinstance(evidence,dict) or not evidence:
@@ -291,6 +407,16 @@ class Scheduler:
                                (row["work_id"],)).fetchone()
                 if not work or work["status"]!="done":
                     raise ValueError("linked local work must be completed with separate work-finish evidence")
+            if row["kind"]=="promise" and row["logical_key"].startswith("promise_due:"):
+                # An activity cannot make an outstanding commitment silently
+                # disappear; record actual promise progress or completion first.
+                current=c.execute("""SELECT 1 FROM promises p
+                    WHERE p.status!='done'
+                    AND ('promise_due:'||p.id||':'||
+                        CAST(p.next_action_at AS TEXT))=?""",
+                    (row["logical_key"],)).fetchone()
+                if current:
+                    raise ValueError("promise progress or completion evidence required")
             if row["kind"]=="social" and c.execute(
                     "SELECT 1 FROM social_intents WHERE activity_id=?",
                     (ident,)).fetchone():

@@ -161,9 +161,21 @@ def parser():
     a.add_argument("--lease-version",type=int,required=True)
     a.add_argument("--result",required=True,choices=("accepted","confirmed_failed","unknown"))
     a.add_argument("--evidence",required=True)
+    a=sub.add_parser("wakeup-execution")
+    a.add_argument("id",help="accepted wakeup request ID")
+    a.add_argument("--wakeup-generation",type=int,required=True)
+    a.add_argument("--activity-id",required=True)
+    a.add_argument("--activity-generation",type=int,required=True)
+    a.add_argument("--worker",required=True)
+    a.add_argument("--phase",choices=("started","progress","finished"),required=True)
+    a.add_argument("--evidence",required=True)
     a=sub.add_parser("wakeup-reconcile")
     a.add_argument("id")
     a.add_argument("--proven-absent",action="store_true")
+    a.add_argument("--evidence",required=True)
+    a=sub.add_parser("wakeup-reconcile-accepted")
+    a.add_argument("id")
+    a.add_argument("--proven-not-started",action="store_true")
     a.add_argument("--evidence",required=True)
     a=sub.add_parser("work-claim")
     a.add_argument("id")
@@ -211,6 +223,8 @@ def parser():
     a.add_argument("--reason",required=True)
     a=sub.add_parser("schedule-status")
     a.add_argument("--limit",type=int,default=50)
+    a=sub.add_parser("schedule-restore")
+    a.add_argument("id")
     return p
 
 
@@ -346,6 +360,8 @@ def main(argv=None):
                 result=Scheduler(db,cfg.lease_seconds).cancel(args.id,now,args.reason)
             elif args.command=="schedule-status":
                 result=Scheduler(db,cfg.lease_seconds).snapshot(now,args.limit)
+            elif args.command=="schedule-restore":
+                result=Scheduler(db,cfg.lease_seconds).restore(args.id,now)
             elif args.command=="outbox-drain":
                 if not args.once:
                     raise ValueError("outbox-drain is deliberately single-shot: pass --once")
@@ -402,15 +418,27 @@ def main(argv=None):
             elif args.command=="wakeup-ack":
                 result=Wakeups(db,cfg.lease_seconds).acknowledge(
                     args.id,args.owner,args.lease_version,now,args.result,evidence(args.evidence))
+            elif args.command=="wakeup-execution":
+                result=Wakeups(db,cfg.lease_seconds).record_execution(
+                    args.id,args.wakeup_generation,args.activity_id,
+                    args.activity_generation,args.worker,args.phase,
+                    now,evidence(args.evidence))
             elif args.command=="wakeup-reconcile":
                 result=Wakeups(db,cfg.lease_seconds).reconcile_unknown(
                     args.id,now,args.proven_absent,evidence(args.evidence))
+            elif args.command=="wakeup-reconcile-accepted":
+                result=Wakeups(db,cfg.lease_seconds).reconcile_accepted_no_start(
+                    args.id,now,args.proven_not_started,evidence(args.evidence))
             elif args.command=="work-claim":
                 item=Queue(db,cfg.lease_seconds).claim_specific(
                     args.id,args.owner,now,evidence(args.authorization_evidence))
                 result={"work_id":item["id"],"lease_owner":item["lease_owner"],
                         "lease_version":item["lease_version"],"lease_until":item["lease_until"],
                         "payload":item["payload"],"warning":"local claim is not CrewQuay role authorization"}
+                if "scheduler_activity_id" in item:
+                    result.update(schedule_id=item["scheduler_activity_id"],
+                                  schedule_owner=item["lease_owner"],
+                                  schedule_generation=item["scheduler_generation"])
             elif args.command=="work-renew":
                 renewed=Queue(db,cfg.lease_seconds).renew(
                     {"id":args.id,"lease_owner":args.owner,"lease_version":args.lease_version},
