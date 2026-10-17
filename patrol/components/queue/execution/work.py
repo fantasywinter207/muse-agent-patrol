@@ -78,6 +78,8 @@ class Queue:
                     lease_until,preempt_requested,weight FROM schedule_activities
                     WHERE work_id=?""",(ident,)).fetchone()
             source=c.execute("SELECT status FROM work_items WHERE id=?",(ident,)).fetchone()
+            if source and source["status"]=="running":
+                raise ValueError("human work unavailable or already leased")
             manual_unblock=bool(
                 activity and source and
                 source["status"] in ("blocked","needs_approval") and
