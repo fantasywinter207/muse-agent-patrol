@@ -406,7 +406,7 @@ def main(argv=None):
                 # slice. Social is normal low-priority Agent work; platform
                 # action permissions are evaluated separately at send time.
                 result=HostHandoff(db,cfg.lease_seconds).prepare(
-                    args.owner,now,allow_social=True)
+                    args.owner,now,allow_social=cfg.community_social_enabled)
             elif args.command=="wakeup-stage":
                 result={"staged":Wakeups(db,cfg.lease_seconds).stage(now,threshold=cfg.wakeup_min_score),
                         "host_called":False}
