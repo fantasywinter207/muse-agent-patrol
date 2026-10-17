@@ -10,7 +10,12 @@ def priority(row, now, *, running=False):
         remaining=float(deadline)-now
         urgent=75.0 if remaining<=0 else max(0.0, 75.0*(1.0-remaining/3600.0))
     ready_since=float(row["ready_since"])
-    aging=0.0 if running else min(30.0,max(0.0,(now-ready_since)/90.0))
+    # The initial aging ramp is bounded to limit short-term thrashing. A
+    # second, slower *unbounded* waiting credit prevents indefinite starvation
+    # when high-base activities keep arriving. Each granted slice resets
+    # ready_since when the worker yields.
+    wait=max(0.0,now-ready_since)
+    aging=0.0 if running else min(30.0,wait/90.0)+max(0.0,wait-900.0)/30.0
     fair=min(34.0,max(0.0,float(row["virtual_runtime"])/60.0))
     # Do not thrash on small priority changes. Existing work retains some
     # continuity, while new resumptions pay a measured local restore penalty.
@@ -32,6 +37,12 @@ def preemption(running, challenger, now):
     other_score=priority(challenger,now)
     remaining=(float(challenger["deadline"])-now
                if challenger["deadline"] is not None else math.inf)
+    # A task with a hard deadline in the next 30 seconds must first get
+    # its safe point; long-waiting background work cannot displace it.
+    running_deadline=running["deadline"]
+    if (running_deadline is not None and float(running_deadline)-now<=30
+            and (challenger["deadline"] is None or float(challenger["deadline"])-now>30)):
+        return None
     # A large gap supersedes hysteresis; near-deadline work has an
     # urgency-sensitive override; expired slices permit fair rotation.
     if remaining<=30 and other_score>=active_score-8:
