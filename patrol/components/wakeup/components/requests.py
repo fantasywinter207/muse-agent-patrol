@@ -1,6 +1,7 @@
 """Durable wakeup intent outbox. NEVER calls a model, Cron, Hook or remote API."""
 import json
 from ...persistence.index import canonical, new_id, StaleLease
+from ...scheduling.index import activity_priority
 
 
 class Wakeups:
@@ -15,20 +16,34 @@ class Wakeups:
         with self.db.transaction() as c:
             # Only actual agent-decision work, not mere uninspected messages.
             # Blocked includes 'no executor': it still needs Muse judgement.
-            works=c.execute("""SELECT w.id,w.priority,e.source
+            works=c.execute("""SELECT w.id,w.priority,e.source,
+                    a.status AS activity_status,a.base_priority,a.deadline,
+                    a.ready_since,a.virtual_runtime,a.switch_cost
                 FROM work_items w LEFT JOIN events e ON e.id=w.event_id
+                LEFT JOIN schedule_activities a ON a.work_id=w.id
                 WHERE w.type='human_action'
                   AND w.status IN ('pending','retry_wait','blocked','needs_approval')
-                  AND w.priority>=? AND (w.event_id IS NULL OR e.source IN ('messages','agent_events'))
+                  AND (w.priority>=? OR
+                       (a.status IN ('ready','suspended') AND a.deadline<=?))
+                  AND (w.event_id IS NULL OR e.source IN ('messages','agent_events'))
                   AND NOT EXISTS(SELECT 1 FROM promises p WHERE p.work_item_id=w.id)
-                ORDER BY w.priority DESC,w.created_at LIMIT ?""",(threshold,limit)).fetchall()
+                ORDER BY w.priority DESC,w.created_at LIMIT ?""",
+                (threshold,now+3600,min(800,max(limit*4,limit)))).fetchall()
             for w in works:
+                # Use the same dynamic deadline/fairness policy as Scheduler;
+                # a low base score can become urgent near its real deadline.
+                effective=(activity_priority(w,now)
+                           if w["activity_status"] in ("ready","suspended")
+                           else float(w["priority"]))
+                if effective<threshold:
+                    continue
+                effective=min(100,max(0,int(round(effective))))
                 k="work:"+w["id"]
                 n=c.execute("""INSERT INTO wakeup_requests(
                     id,logical_key,source_type,source_id,priority,reason,created_at,next_attempt_at)
                     VALUES(?,?,'work',?,?,?, ?,?)
                     ON CONFLICT(logical_key) DO NOTHING""",
-                    (new_id(),k,w["id"],min(100,max(0,w["priority"])),
+                    (new_id(),k,w["id"],effective,
                      "authorized agent decision needed; not platform approval",now,now)).rowcount
                 added+=n
             # Only due or near-due promises, never every dormant future promise.
