@@ -3,7 +3,7 @@ import json
 import time
 from urllib.parse import quote
 from ...attention.index import Attention
-from ...deployment import Deployment
+from ...deployment.index import Deployment
 from ...collection.index import Collector, Sync, event_time
 from ...outbox.index import Outbox
 from ...executor.index import ActionSender
