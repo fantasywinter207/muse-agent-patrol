@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from patrol.components.config.index import Config
 from patrol.components.persistence.index import Database
