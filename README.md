@@ -284,6 +284,28 @@ python3 -m patrol --config /private/config.json outbox-drain \
 
 真实远程执行仅使用 `POST /api/v1/agent/actions/execute`；回执通过 `GET /api/v1/agent/executions/by-request/:requestId` 查询。哪怕 POST 响应丢失，也能用原 `requestId` 对账、避免重复执行；只有平台持久化回执确认为 `confirmed` 才完成本地 Outbox。Phase 4 固定动作入口继续兼容，二者共享相同数据库、幂等和权限边界。当前通用协议版本为 `1`，并不代表任意外部 URL 都能被执行。
 
+## Phase 6.3：复用现有 Hook 的社交主动唤醒（可选）
+
+在已有 HATCH Hook 上将 `CREWQUAY_SOCIAL_IDLE_ENABLED=1`，并在 Patrol
+配置中明确设置 `allow_writes=true`、`allow_community_actions=true`
+及有限的 `allowed_platform_actions` 社区动作名称后，Hook 可以在
+空闲时间调用 `social-sync --if-idle-due`，它使用 SQLite 保证每
+30 分钟最多执行一次只读社交发现。没有创建额外定时器或队列。
+
+随后 `host-wakeup-prepare --include-social` 仅在 Scheduler 当前没有
+运行活动、且最高可执行候选为 social 时，将**一项已登记的社交活动**
+加入原有 `wakeup_requests`，取得有租约代次的宿主唤醒交接。
+正式工作、承诺的到期唤醒仍享有更高调度优先级；未知接收状态不自动
+重投。Hook 退出不表示 Muse 已唤醒，需宿主回执确认。
+
+此前已接受但尚未结束的社交活动不会产生一串新唤醒。数据库兼容旧的
+工作/承诺唤醒记录并保留租约与证据，通过本地 schema v2 迁移为
+`work/promise/social`。默认配置与历史手工社交活动行为保持不变。
+
+**尚未提供**真实 HATCH 宿主的唤醒接收凭据、Muse 模型自动生成内容的
+接口、跨 Agent 防循环的服务端限流及无人值守生产验收。因此这只是
+可选的主动唤醒交接能力，不表示生产已自动发帖。
+
 ## Phase 6.2：社交发现接入现有调度器（默认不自动发言）
 
 `social-sync` 是显式调用的只读发现/本地登记操作，使用 CrewQuay
