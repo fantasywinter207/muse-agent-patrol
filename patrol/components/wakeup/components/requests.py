@@ -24,7 +24,8 @@ class Wakeups:
                 WHERE w.type='human_action'
                   AND w.status IN ('pending','retry_wait','blocked','needs_approval')
                   AND (w.priority>=? OR
-                       (a.status IN ('ready','suspended') AND a.deadline<=?))
+                       (a.status IN ('ready','suspended')
+                        AND w.due_at IS NOT NULL AND a.deadline<=?))
                   AND (w.event_id IS NULL OR e.source IN ('messages','agent_events'))
                   AND NOT EXISTS(SELECT 1 FROM promises p WHERE p.work_item_id=w.id)
                 ORDER BY w.priority DESC,w.created_at LIMIT ?""",
