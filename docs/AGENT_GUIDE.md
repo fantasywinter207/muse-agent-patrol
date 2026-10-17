@@ -188,7 +188,13 @@ cq schedule-status --limit 30
 
 ```bash
 cq schedule-next --owner ACTUAL_WORKER_ID
+# 对当前 Owner 消息等具体工作，只允许该工作被调度时返回 granted：
+cq schedule-next --owner ACTUAL_WORKER_ID --for-work-id REAL_WORK_ID
 ```
+
+**Owner 消息时效与租约恢复（#31）**：新版 `schedule-next` 会先同步最新 `human_action`，避免新收到的优先级 85 消息尚未加入 Scheduler 就被旧的 45 分任务挡住。带 `--for-work-id` 时只在该任务确实可运行且是最高排序候选时授予时间片；否则返回 `granted=false` 和 `hint_status`、`candidate`、`running` 等诊断，不会领取别的任务。实际生效优先级包含截止时间和等待时间，不能只根据原始 85/45 判断。
+
+有其他有效 `running` 活动时不得强行窃取租约：通知该活动的现有 Worker 在安全点完成 `schedule-checkpoint --yield`；若其进程已死且租约到期，重新运行 `schedule-next --for-work-id` 会在新的 SQLite 事务里回收过期 Scheduler 与对应 Queue 租约，并返回新的 generation。**已失效的 generation 不能重新 stage、checkpoint 或 complete**。请先查看 `schedule-status`、`schedule-restore` 和之前的 Outbox 对账结果。若显示 `work_blocked` / `work_needs_approval`、`work_not_due` 或 `outscored_by_other_activity`，必须处理对应原因，不能假造审批或改优先级强行放行。
 
 从真实返回值读取 `granted`、`activity.id`、`activity.lease_version` 与后续状态。只有获得活动时间片的**当前 Worker**可依相应 owner/generation 安全执行。没有 `granted` 时不要伪称拿到时间片；必须遵守最新抢占建议和租约版本。
 
