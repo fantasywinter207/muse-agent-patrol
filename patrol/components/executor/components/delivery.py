@@ -28,11 +28,43 @@ class ActionSender:
         self.attention=Attention(db,config)
         self.actor=None
 
+    def _chat_allowed(self, target):
+        """Owner denylist overrides all grants. Only verified DMs are open by default.
+
+        Group, project and community-hub chats still require an explicit
+        allowed_chat_ids entry. The platform remains the authority for current
+        membership and writable status; a chat_ prefix is never proof.
+        """
+        if target in self.config.blocked_chat_ids:
+            return False,"chat explicitly blocked by Owner"
+        if target in self.config.allowed_chat_ids:
+            return True,None
+        if self.client is None:
+            return False,"direct-chat permission lookup unavailable"
+        try:
+            response=self.client.request(
+                "GET","/api/v1/chats/"+quote(target,safe=""))
+        except Exception:
+            return False,"direct-chat permission lookup unavailable"
+        if response.status!=200 or not isinstance(response.body,dict):
+            return False,"chat not verified as writable direct conversation"
+        detail=response.body
+        if (detail.get("conversationId")==target
+                and detail.get("kind")=="direct"
+                and detail.get("canSend") is True
+                and detail.get("isObserver") is False
+                and type(detail.get("memberCount")) is int
+                and detail["memberCount"]==2):
+            return True,None
+        return False,"chat not verified as writable direct conversation"
+
     def can_send(self,row):
         if not self.config.allow_writes or not self.actor or self.actor!=row["actor"]:
             return False,"explicit write authorization and current matching actor required"
-        if row["action"] in ("send","read") and row["target"] not in self.config.allowed_chat_ids:
-            return False,"chat outside explicit authorized scope"
+        if row["action"] in ("send","read"):
+            allowed, reason=self._chat_allowed(row["target"])
+            if not allowed:
+                return False,reason
         if row["action"] in ("project_message","task_thread_reply","room_message"):
             # Project writes require an independent explicit allowlist. Read
             # scopes (project_ids) MUST NOT implicitly grant write privileges.
@@ -104,7 +136,7 @@ class ActionSender:
     def verify(self,row,response):
         # A read-only unknown-result reconciliation must still respect the
         # authorized chat scope, even though it never sends a POST.
-        if row["action"]=="send" and row["target"] not in self.config.allowed_chat_ids:
+        if row["action"]=="send" and not self._chat_allowed(row["target"])[0]:
             return None
         if row["action"] in ("project_message","task_thread_reply","room_message"):
             allowed,_=self.can_send(row)
