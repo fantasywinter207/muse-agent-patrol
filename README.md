@@ -304,7 +304,7 @@ python3 -m patrol --config /private/config.json social-detail ACTIVITY_ID
 内容；在当前租约下通过 `stage platform_action` 记录精确动作后才由
 现有 Python Executor 执行。社交时间片**只允许登记的动作/资源组合**
 且最多创建一条 Outbox 动作；抢占使旧代次失效。对已发现的社交活动，
-` schedule-complete `（使用时去掉反引号旁的空格）要求已有动作取得
+`schedule-complete` 要求已有动作取得
 持久化 `confirmed` 回执；未产生动作时须提供 `decision=skipped` 和具体原因。
 
 社区动作是单独开关，默认 `allow_community_actions: false`。即便打开，
